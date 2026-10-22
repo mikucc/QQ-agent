@@ -92,6 +92,28 @@ await check('zip 根目录剥离：服务端格式 <id>/... 剥掉一层', async
   assert.ok(fs.existsSync(path.join(root, 'skills', 'fake-skill', 'plugin.json')), '剥前缀后文件应在目录根部');
 });
 
+await check('双层同名根目录自愈：<id>/<id>/... 也能在根部找到清单', async () => {
+  // 真实案例：市场包被套了两层（reply-meme/reply-meme/skill.json），
+  // 旧安装器只剥一层，结果 skills/reply-meme/reply-meme/skill.json，
+  // 技能页显示“缺少 skill.json / plugin.json”、版本 0.0.0。
+  const stage2 = path.join(tmp, 'stage-double');
+  const inner = path.join(stage2, 'fake-skill', 'fake-skill');
+  fs.mkdirSync(inner, { recursive: true });
+  fs.writeFileSync(path.join(inner, 'skill.json'), '{"id":"fake-skill","name":"双层包"}');
+  fs.writeFileSync(path.join(inner, 'index.js'), 'export function setup() {}\n');
+  fs.mkdirSync(path.join(inner, 'lib'), { recursive: true });
+  fs.writeFileSync(path.join(inner, 'lib', 'util.js'), 'export const x = 1;\n');
+  const zipped2 = await __zipDirectory(stage2);   // 条目：fake-skill/fake-skill/...
+  const root = path.join(tmp, 'root-double');
+  const name = await unzipToModuleDir(zipped2, { root, type: 'skill' });
+  assert.equal(name, 'fake-skill', `目录名应取外层根目录名，实际 ${name}`);
+  const out = path.join(root, 'skills', name);
+  assert.ok(fs.existsSync(path.join(out, 'skill.json')), '清单应上提到安装目录根部');
+  assert.ok(fs.existsSync(path.join(out, 'index.js')), 'index.js 应上提到安装目录根部');
+  assert.ok(fs.existsSync(path.join(out, 'lib', 'util.js')), 'lib 应完整保留');
+  assert.ok(!fs.existsSync(path.join(out, 'fake-skill')), '内层同名目录应被移除');
+});
+
 await check('含可执行文件的 zip 被拒绝（打包端拦截 + 解压端拦截双保险）', async () => {
   const evil = path.join(tmp, 'evil');
   fs.mkdirSync(evil, { recursive: true });

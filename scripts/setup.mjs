@@ -51,12 +51,30 @@ const SNOWLUMA_VERSION_OVERRIDDEN = !!process.env.SNOWLUMA_VERSION && process.en
 const SNOWLUMA_SHA256 = (process.env.SNOWLUMA_SHA256 || '').trim()
   || ((SNOWLUMA_REPO_OVERRIDDEN || SNOWLUMA_VERSION_OVERRIDDEN) ? '' : SNOWLUMA_PINNED_SHA256);
 
+// ── GitHub 下载加速（可选）────────────────────────────────────────────
+// 国内直连 GitHub Release 经常只有几十 KB/s。两种方式，任选：
+//   GITHUB_PROXY=https://ghproxy.net
+//       → 只改写 release 资产 URL（API 仍走 api.github.com）
+//   SNOWLUMA_DOWNLOAD_URL=https://<镜像>/.../SnowLuma-vX.Y.Z-win-x64.zip
+//       → 完全跳过 GitHub API，直接下这个地址（API 也不通时用）
+// 资产仍按 SNOWLUMA_SHA256 校验，镜像/代理无法篡改内容；哈希对不上就拒装。
+const GITHUB_PROXY = (process.env.GITHUB_PROXY || '').trim().replace(/\/+$/, '');
+const SNOWLUMA_DOWNLOAD_URL = (process.env.SNOWLUMA_DOWNLOAD_URL || '').trim();
+const SNOWLUMA_URL_OVERRIDDEN = !!SNOWLUMA_DOWNLOAD_URL;
+
+/** 给 GitHub release 资产套一层代理前缀（形如 https://ghproxy.net/https://github.com/...）。 */
+function withGithubProxy(url) {
+  if (!GITHUB_PROXY) return url;
+  if (!/^https:\/\/(github\.com|objects\.githubusercontent\.com)\//i.test(url)) return url;
+  return `${GITHUB_PROXY}/${url}`;
+}
+
 // ── QQ 下载源 ──
 // 从自己的分发站下载（不依赖腾讯 CDN 的文件名规则，也不会因 CDN 清档而 404）。
 // ── 目标版本 ──────────────────────────────────────────────────────────
 // 我们希望协议栈打交道的客户端版本。免安装包里装的就是这一版。
 // EXPECTED_CLIENT_BUILD 由它推导，用来和 SnowLuma 声明的版本比对。
-const QQ_VERSION = process.env.QQ_PORTABLE_VERSION || '9.9.33.51802';
+const QQ_VERSION = (process.env.QQ_PORTABLE_VERSION || '9.9.33.51802').trim();
 const QQ_VERSION_SHORT = QQ_VERSION.split('.').slice(0, 3).join('.');
 const QQ_BUILD = QQ_VERSION.split('.').pop();
 
@@ -104,7 +122,7 @@ const QQ_X64_SHA256 = (process.env.QQ_X64_SHA256
 // ⚠️ 版本匹配检查用：SnowLuma 的协议栈会声明一个 CLIENT_BUILD（形如 "9.9.26-44343"），
 // 它决定了握手时自称的客户端版本。QQ 版本与它差太远时，登录可能被拒或行为异常。
 // 安装完成后会读出来和 QQ_VERSION 比对并给出醒目提示（见 checkClientBuildMatch）。
-const EXPECTED_CLIENT_BUILD = process.env.EXPECTED_CLIENT_BUILD || `${QQ_VERSION_SHORT}-${QQ_BUILD}`;
+const EXPECTED_CLIENT_BUILD = (process.env.EXPECTED_CLIENT_BUILD || `${QQ_VERSION_SHORT}-${QQ_BUILD}`).trim();
 
 const args = process.argv.slice(2);
 const FORCE = args.includes('--force');
@@ -203,21 +221,29 @@ async function installSnowluma() {
   fs.mkdirSync(QQ_CACHE_DIR, { recursive: true });
 
   try {
-    const apiUrl = `https://api.github.com/repos/${SNOWLUMA_REPO}/releases/tags/${SNOWLUMA_VERSION}`;
-    log('查询 SnowLuma Release:', apiUrl);
-    const res = await fetch(apiUrl, { headers: { 'User-Agent': 'qq-agent-setup' } });
-    if (!res.ok) throw new Error(`GitHub API ${res.status}`);
-    const rel = await res.json();
-    const asset = (rel.assets ?? []).find((a) => a.name === SNOWLUMA_ASSET);
-    if (!asset) throw new Error(`Release ${SNOWLUMA_VERSION} 中没有 ${SNOWLUMA_ASSET}`);
+    // 允许完全跳过 GitHub API：API 本身被墙/超时的时候，直接给镜像地址。
+    let assetUrl = SNOWLUMA_DOWNLOAD_URL;
+    if (assetUrl) {
+      log('使用 SNOWLUMA_DOWNLOAD_URL 指定的下载地址（跳过 GitHub API）');
+    } else {
+      const apiUrl = `https://api.github.com/repos/${SNOWLUMA_REPO}/releases/tags/${SNOWLUMA_VERSION}`;
+      log('查询 SnowLuma Release:', apiUrl);
+      const res = await fetch(apiUrl, { headers: { 'User-Agent': 'qq-agent-setup' } });
+      if (!res.ok) throw new Error(`GitHub API ${res.status}`);
+      const rel = await res.json();
+      const asset = (rel.assets ?? []).find((a) => a.name === SNOWLUMA_ASSET);
+      if (!asset) throw new Error(`Release ${SNOWLUMA_VERSION} 中没有 ${SNOWLUMA_ASSET}`);
+      assetUrl = withGithubProxy(asset.browser_download_url);
+      if (GITHUB_PROXY) log(`GitHub 代理前缀：${GITHUB_PROXY}`);
+    }
 
     // ⚠️ 供应链防线：
     //  - 下载源被环境变量改写（SNOWLUMA_REPO / SNOWLUMA_VERSION）时**必须**同时给出
     //    SNOWLUMA_SHA256，否则拒绝下载 —— 否则任何人只要改一个环境变量，
     //    就能让安装脚本下载并执行任意 zip（而 zip 里就是将被 spawn 的代码）。
     //  - 走官方仓库 + 默认版本时，用常量里固定的官方资产摘要做完整性校验。
-    if (!SNOWLUMA_SHA256 && (SNOWLUMA_REPO_OVERRIDDEN || SNOWLUMA_VERSION_OVERRIDDEN)) {
-      die('检测到 SNOWLUMA_REPO / SNOWLUMA_VERSION 被覆盖，但未提供 SNOWLUMA_SHA256。\n'
+    if (!SNOWLUMA_SHA256 && (SNOWLUMA_REPO_OVERRIDDEN || SNOWLUMA_VERSION_OVERRIDDEN || SNOWLUMA_URL_OVERRIDDEN)) {
+      die('检测到 SNOWLUMA_REPO / SNOWLUMA_VERSION / SNOWLUMA_DOWNLOAD_URL 被覆盖，但未提供 SNOWLUMA_SHA256。\n'
         + '  为防供应链投毒，拒绝从非官方来源下载。请设置 SNOWLUMA_SHA256=<zip 的 sha256> 后重试。');
     }
     if (!SNOWLUMA_SHA256) {
@@ -240,7 +266,7 @@ async function installSnowluma() {
       }
     }
     if (!fs.existsSync(zipPath)) {
-      await download(asset.browser_download_url, zipPath, {
+      await download(assetUrl, zipPath, {
         expectedSha256: SNOWLUMA_SHA256 || null,
         label: 'SnowLuma '
       });
@@ -267,6 +293,14 @@ async function installSnowluma() {
     warn(`自动下载 SnowLuma 失败：${error.message}`);
     warn(`请手动下载 SnowLuma ${SNOWLUMA_VERSION} 并解压到 ${SNOWLUMA_DIR}`);
     warn(`下载地址：https://github.com/${SNOWLUMA_REPO}/releases/tag/${SNOWLUMA_VERSION}`);
+    warn('');
+    warn('  直连 GitHub 慢的话，可以走镜像/代理后重试：');
+    warn('    set GITHUB_PROXY=https://ghproxy.net');
+    warn('    set SNOWLUMA_VERSION=vX.Y.Z && set SNOWLUMA_SHA256=<zip 的 sha256>');
+    warn('    npm run setup -- --force --skip-qq');
+    warn('  或者直接指定镜像直链（会跳过 GitHub API）：');
+    warn('    set SNOWLUMA_DOWNLOAD_URL=https://<镜像>/.../SnowLuma-vX.Y.Z-win-x64.zip');
+    warn('');
 
     if (!isSnowlumaReady()) {
       die('SnowLuma 目录不完整，无法继续。请下载后重跑 setup');
@@ -515,60 +549,66 @@ async function installQqPortable() {
 
   const installerPath = path.join(QQ_CACHE_DIR, QQ_INSTALLER_NAME);
 
-  // 如果缓存里有之前下载的安装器，先校验
-  if (fs.existsSync(installerPath)) {
-    const hash = fileSha256(installerPath);
-    if (!QQ_X64_SHA256) {
-      // 没配哈希时不能判"不匹配" —— 那会导致每次 setup 都重下一遍几百 MB
-      log(`缓存安装器已存在（SHA256 ${hash.slice(0, 16)}…），跳过下载`);
-    } else if (hash === QQ_X64_SHA256) {
-      log('缓存安装器 SHA256 校验通过，跳过下载');
-    } else {
-      log('缓存安装器 SHA256 不匹配，重新下载');
-      fs.rmSync(installerPath, { force: true });
-    }
-  }
-
-  // 下载 QQ 安装包
-  if (!fs.existsSync(installerPath)) {
-    try {
-      const dl = await download(QQ_X64_URL, installerPath, {
-        expectedSha256: QQ_X64_SHA256 || null,
-        label: 'QQ 安装包 '
-      });
-      if (!QQ_X64_SHA256) {
-        warn('安装包未做完整性校验（未配置 QQ_X64_SHA256）。');
-        warn(`  本次下载到的 SHA256 = ${dl.sha256}`);
-        warn('  确认来源可信后，可把它填进 scripts/setup.mjs 的 QQ_X64_SHA256，');
-        warn('  或用环境变量 QQ_X64_SHA256 传入，之后每次都会校验。');
-      }
-    } catch (error) {
-      warn(`自动下载 QQ 安装包失败：${error.message}`);
-      warn(``);
-      warn(`=== 手动放置指引 ===`);
-      warn(`1. 手动下载 ${QQ_INSTALLER_NAME}（x64）`);
-      warn(`   下载地址：${QQ_X64_URL}`);
-      warn('   （官方安装包：https://im.qq.com/index/#/windows ，版本不限，装完脚本会复制过来）');
-      warn(`2. 将下载的 ${QQ_INSTALLER_NAME} 放入：${QQ_CACHE_DIR}`);
-      warn(`3. 重新运行：npm run setup`);
-      warn(`==================`);
-      die('QQ 安装包不可用');
-    }
-  }
-
-  // ── 识别安装包类型：不同打包器的静默开关完全不同 ──
-  // 原来写死 NSIS 的 `/s /D=`。用错开关的典型后果是安装器**弹出 GUI 等人点**，
-  // 脚本一直等到超时被杀 —— 表现就是"退出码取不到"。
+  // ── 安装器是**最后的退路**，按需获取 ─────────────────────────────────
+  // 机器上已有 QQ 时（复制路径）根本用不到它。原来这里无条件先下载，结果：
+  // 分发站的安装包一 404，即便本地装着 QQ 也直接失败 —— 报错只说"下载失败"，
+  // 真正的出路（下面"从已装 QQ 复制"那段）根本没机会执行。
   let kind = null;
-  try { kind = detectInstallerTypeFromFile(installerPath); } catch { /* ignore */ }
-  if (kind) log(`安装包类型：${kind.label}（命中特征 ${kind.matched}）→ 使用 ${kind.note}`);
-  else warn('安装包类型未识别（不是常见的 NSIS / Inno / InstallShield 之一）');
+  let installerReady = false;
+  const ensureInstaller = async () => {
+    if (installerReady) return true;
+
+    // 缓存里有之前下载的安装器，先校验
+    if (fs.existsSync(installerPath)) {
+      const hash = fileSha256(installerPath);
+      if (!QQ_X64_SHA256) {
+        // 没配哈希时不能判"不匹配" —— 那会导致每次 setup 都重下一遍几百 MB
+        log(`缓存安装器已存在（SHA256 ${hash.slice(0, 16)}…），跳过下载`);
+      } else if (hash === QQ_X64_SHA256) {
+        log('缓存安装器 SHA256 校验通过，跳过下载');
+      } else {
+        log('缓存安装器 SHA256 不匹配，重新下载');
+        fs.rmSync(installerPath, { force: true });
+      }
+    }
+
+    if (!fs.existsSync(installerPath)) {
+      try {
+        const dl = await download(QQ_X64_URL, installerPath, {
+          expectedSha256: QQ_X64_SHA256 || null,
+          label: 'QQ 安装包 '
+        });
+        if (!QQ_X64_SHA256) {
+          warn('安装包未做完整性校验（未配置 QQ_X64_SHA256）。');
+          warn(`  本次下载到的 SHA256 = ${dl.sha256}`);
+          warn('  确认来源可信后，可把它填进 scripts/setup.mjs 的 QQ_X64_SHA256，');
+          warn('  或用环境变量 QQ_X64_SHA256 传入，之后每次都会校验。');
+        }
+      } catch (error) {
+        warn(`自动下载 QQ 安装包失败：${error.message}`);
+        warn('  （机器上已经装了 QQ 的话不需要这个安装包 —— 退出 QQ 后重跑 setup 即可）');
+        return false;
+      }
+    }
+
+    // ── 识别安装包类型：不同打包器的静默开关完全不同 ──
+    // 原来写死 NSIS 的 `/s /D=`。用错开关的典型后果是安装器**弹出 GUI 等人点**，
+    // 脚本一直等到超时被杀 —— 表现就是"退出码取不到"。
+    try { kind = detectInstallerTypeFromFile(installerPath); } catch { /* ignore */ }
+    if (kind) log(`安装包类型：${kind.label}（命中特征 ${kind.matched}）→ 使用 ${kind.note}`);
+    else warn('安装包类型未识别（不是常见的 NSIS / Inno / InstallShield 之一）');
+
+    installerReady = fs.existsSync(installerPath);
+    return installerReady;
+  };
 
   // ── 决定"从哪里拿 QQ" ──
   // 便携运行靠的是 --user-data-dir，**并不需要一份干净的程序文件**，
   // 所以最优路径是：直接用机器上已经装好的那份。
   // 只有机器上压根没有 QQ 时，才需要用户先装一次。
-  if (!foundQqExe()) {
+  // --force 也要重做便携 QQ：否则目录里残留的旧副本会让 foundQqExe() 为真，
+  // 整个复制分支被跳过 —— 表现就是"加了 --force 却什么也没重装"。
+  if (FORCE || !foundQqExe()) {
     let source = null;
     let sourceReason = '';
 
@@ -588,22 +628,62 @@ async function installQqPortable() {
       if (sourceReason.includes('--from')) log(`使用指定目录：${source}`);
       // ⚠️ QQ 运行时它的 exe/dll 被占用，复制会失败或拿到半截文件 ——
       // 产出的是"看起来装好了、启动才发现缺文件"的便携 QQ，极难排查。
-      // 宁可让用户花 10 秒关掉 QQ，也不要产半成品。
+      // 这条**不接受 --force 绕过**：文件锁不会因为加了个参数就消失。
       const running = runningQqCount();
-      if (running > 0 && !FORCE) {
+      if (running > 0) {
         warn('');
         warn(`检测到 ${running} 个 QQ 进程正在运行，先不复制。`);
         warn('  正在运行的 QQ 其程序文件被占用，复制出来的便携版会缺文件。');
         warn('  请**完全退出 QQ**（托盘图标也要退出），然后重跑：npm run setup');
-        warn('  （确实想带着运行中的状态复制，可加 --force，但可能得到不完整的副本）');
+        warn('  （--force 也绕不过文件占用——它只会让你得到一个缺文件的副本）');
         warn('');
         die('QQ 正在运行，无法安全复制');
       }
-      if (running > 0) warn(`--force：仍然有 ${running} 个 QQ 进程在运行，复制结果可能不完整`);
+      if (FORCE && fs.existsSync(QQ_PORTABLE_DIR)) {
+        log('--force：清空旧便携 QQ 目录，重新复制');
+        try {
+          fs.rmSync(QQ_PORTABLE_DIR, { recursive: true, force: true });
+        } catch (e) {
+          die(`清空旧便携 QQ 目录失败（文件可能被占用）：${e.message}`);
+        }
+      }
       copyInstalledQq(source);
       QQ_SOURCE = 'copied';
+      // 复制的是用户机器上的那份，版本很可能不是配置里的目标版本 ——
+      // 明确报出来，并给出"按实际版本重跑"的命令（重跑时 setup 会重新对齐声明）。
+      const copiedVer = readQqVersionFromDir(QQ_PORTABLE_DIR);
+      if (copiedVer) {
+        log(`复制过来的 QQ 版本：${copiedVer.short}-${copiedVer.build}`);
+        if (`${copiedVer.short}-${copiedVer.build}` !== EXPECTED_CLIENT_BUILD) {
+          warn(`  与配置的期望版本 ${EXPECTED_CLIENT_BUILD} 不同。若扫码登录被拒，按实际版本重跑：`);
+          warn(`    set QQ_PORTABLE_VERSION=${copiedVer.short}.${copiedVer.build} && npm run setup`);
+          warn('  这样协议栈"自报家门"的版本才会与真实客户端一致（对齐发生在装 QQ 之前）。');
+        }
+      } else {
+        warn('  读不到复制过来的 QQ 版本（versions/ 目录缺失）；若登录被拒，请确认版本。');
+      }
     } else {
       // ── 全新机器：机器上没有 QQ，安装器又不支持静默安装 ──
+      // 到这里才真正需要安装包 —— 先按需下载；拿不到就引导用户装官方版，
+      // 而不是死等一个已经 404 的固定文件。
+      if (!(await ensureInstaller())) {
+        warn('');
+        warn('='.repeat(66));
+        warn('这台机器上没有找到已安装的 QQ，自动下载安装包也失败了。');
+        warn('');
+        warn('  直接装一个官方 QQ 就行，**版本不限**：');
+        warn('    https://im.qq.com/index/#/windows');
+        warn('');
+        warn('  1) 正常安装（装到哪都行，脚本会从注册表 / 常见路径自己找）');
+        warn('  2) **完全退出 QQ**（托盘图标也要右键退出）');
+        warn('  3) 重跑：npm run setup');
+        warn('');
+        warn('  然后脚本会把装好的 QQ 复制成便携版 —— 不需要那个下载不到的安装包。');
+        warn('  装在自定义路径时：npm run setup -- --from "D:\\你的安装目录"');
+        warn('='.repeat(66));
+        warn('');
+        die('请先安装一个 QQ（任意版本），然后重跑 npm run setup');
+      }
       warn('');
       warn('='.repeat(66));
       warn('这台机器上没有找到已安装的 QQ，需要先装一次。');
@@ -645,6 +725,14 @@ async function installQqPortable() {
       } else {
         die('需要先手动安装 QQ（见上方四步），然后重跑 npm run setup');
       }
+    }
+  }
+
+  // 复制路径失败了（例如源目录文件被占用、只复制到一半）：安装器是最后的退路。
+  // 这一步也放在这里而不是前面，保证"本地有 QQ"时永远不碰网络。
+  if (!foundQqExe() && !installerReady) {
+    if (!(await ensureInstaller())) {
+      die(`没能把 QQ 复制到 ${QQ_PORTABLE_DIR}，安装包也不可用。请用 --from 指定可用的 QQ 目录后重试。`);
     }
   }
 
@@ -818,6 +906,7 @@ function copyInstalledQq(srcDir) {
   const skip = SKIP_ON_COPY;
   let copied = 0;
   let bytes = 0;
+  let failed = 0;
   const walk = (from, to) => {
     fs.mkdirSync(to, { recursive: true });
     for (const e of fs.readdirSync(from, { withFileTypes: true })) {
@@ -830,7 +919,7 @@ function copyInstalledQq(srcDir) {
         fs.copyFileSync(s1, s2);
         copied += 1;
         bytes += fs.statSync(s2).size;
-      } catch { /* 单个文件失败（被占用等）不中断整体 */ }
+      } catch { failed += 1; /* 单个文件失败（被占用等）不中断整体，最后统一报 */ }
     }
   };
   log(`复制程序文件 ${srcDir} → ${QQ_PORTABLE_DIR}（已跳过用户数据目录）`);
@@ -840,6 +929,10 @@ function copyInstalledQq(srcDir) {
     warn(`复制过程出错：${e.message}`);
   }
   log(`复制完成：${copied} 个文件，${(bytes / 1048576).toFixed(0)} MB`);
+  if (failed) {
+    warn(`⚠ 有 ${failed} 个文件没能复制（通常是被占用）—— 这份副本可能不完整。`);
+    warn('  请完全退出 QQ（含托盘）后重来，不要用 --force 绕过占用检查。');
+  }
   return foundQqExe();
 }
 
@@ -902,7 +995,14 @@ async function main() {
   }
 
   log('=== QQ Agent Setup ===');
-  log(`SnowLuma: ${SNOWLUMA_VERSION}`);
+  // 显示**实际安装的** SnowLuma 版本：手动解压升级后，目标版本常量还是旧值，
+  // 只看 `SnowLuma: v1.14.19` 会误以为没升级成功。
+  let slDisplay = SNOWLUMA_VERSION;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(SNOWLUMA_DIR, 'package.json'), 'utf8'));
+    if (pkg.version) slDisplay = `v${pkg.version}（已安装）`;
+  } catch { /* 尚未安装，显示目标版本 */ }
+  log(`SnowLuma: ${slDisplay}`);
   log(`QQ:       ${QQ_VERSION}`);
   log(`工作目录: ${ROOT}`);
   log('');

@@ -104,8 +104,11 @@ npm run setup    # 自动下载 SnowLuma + 固定版本便携 QQ
 2. **装便携 QQ**（可选）：
    - **最省事**：机器上已经装过 QQ 的话，**先完全退出 QQ**，直接跑 `npm run setup` ——
      脚本会从注册表找到已装的 QQ 并复制一份到 `runtime/qq-portable/`（约 1.6 GB，会自动跳过聊天记录）
-   - 否则：下载 <https://www.kondius.cn/netdisk/api/download/QQ_9.9.33_260813_x64_01.exe>
-     （约 300 MB），**正常双击安装一遍**，然后退出 QQ、重跑 `npm run setup`
+   - 否则：从 <https://im.qq.com/index/#/windows> 装一个官方 QQ（**版本不限**），
+     正常双击安装一遍，然后**完全退出 QQ**、重跑 `npm run setup`（脚本会把装好的复制过来）。
+     > ⚠️ 旧的兜底安装包 `QQ_9.9.33_260813_x64_01.exe` 的分发地址可能已 404。
+     > setup 现在只在本机确实找不到 QQ 时才尝试下载它；失败会直接引导你装官方版，
+     > 不再像以前那样在"本机明明有 QQ"的情况下被一个失效链接挡住。
    - 为什么不能自动静默安装：QQ 9.9.x 用的是腾讯自研的 **HummerSetup** 安装器，
      不接受 NSIS/Inno 的静默开关（脚本会识别出来并说明，而不是盲试到超时）
 3. **启动**：双击 `启动QQ机器人.bat`（或 `npm start`），扫码登录 QQ

@@ -18,7 +18,7 @@ const PROVIDER_URL_DEFAULTS = {
   'qwen-token-plan-cn': 'https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1',
   xiaomi: 'https://api.xiaomimimo.com/v1',
   'xiaomi-token-plan-cn': 'https://token-plan-cn.xiaomimimo.com/v1',
-  'opencode-go': 'https://opencode.ai/zen/go/v1'
+  'opencode-go': 'https://opencode.ai/inference/go/openai/v1'
 };
 
 // 密钥环境变量的常见别名（如 DSH 写 A6API_API_KEY，本机实际是 A6API_APIKEY）

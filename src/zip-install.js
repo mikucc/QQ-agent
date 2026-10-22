@@ -10,6 +10,43 @@ import { inflateRawSync } from 'node:zlib';
 const BANNED_EXT = /\.(exe|dll|bat|cmd|ps1|vbs|sh)$/i;
 const MAX_FILES = 100;
 const MAX_TOTAL = 32 * 1024 * 1024;
+const MANIFEST_FILES = ['skill.json', 'plugin.json'];
+
+function hasManifest(dir) {
+  return MANIFEST_FILES.some((f) => fs.existsSync(path.join(dir, f)));
+}
+
+/**
+ * 双层同名目录自愈。
+ *
+ * 市场里的包有两种常见形态：
+ *   <id>/...             → 上面剥一层根目录后正好落在 target 根部
+ *   <id>/<id>/...        → 剥一层后还剩一层同名目录，清单变成 target/<id>/skill.json
+ * 加载器只认 target 根部的 skill.json / plugin.json，后者会显示成
+ * “缺少 skill.json / plugin.json”、版本 0.0.0、没有介绍。
+ *
+ * 这里在解压完成后兜底：根部没有清单、且只有一个子目录带清单时，把子目录内容上提。
+ * 只在这种“明显是套了一层”的情况下动手，不会误伤带 lib/、assets/ 的正常包。
+ *
+ * @returns {boolean} 是否发生了上提
+ */
+function liftSingleNestedRoot(target) {
+  if (hasManifest(target)) return false;
+  let entries;
+  try { entries = fs.readdirSync(target, { withFileTypes: true }); } catch { return false; }
+  const dirs = entries.filter((e) => e.isDirectory());
+  if (dirs.length !== 1) return false;
+  const inner = path.join(target, dirs[0].name);
+  if (!hasManifest(inner)) return false;
+  for (const item of fs.readdirSync(inner)) {
+    const from = path.join(inner, item);
+    const to = path.join(target, item);
+    if (fs.existsSync(to)) continue;   // 不覆盖根部已有文件
+    fs.renameSync(from, to);
+  }
+  try { fs.rmdirSync(inner); } catch { /* 非空就留着，不阻塞安装 */ }
+  return hasManifest(target);
+}
 
 /**
  * 结构校验（抛错 = 拒绝安装）：
@@ -73,6 +110,8 @@ export async function unzipToModuleDir(buffer, { root, type, preferId = '' }) {
     fs.mkdirSync(path.dirname(dest), { recursive: true });
     fs.writeFileSync(dest, entries[i].data);
   }
+  // 双根目录包（<id>/<id>/...）自愈：否则加载器看不到根部的清单
+  liftSingleNestedRoot(target);
   return finalName;
 }
 

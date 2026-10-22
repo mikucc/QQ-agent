@@ -124,10 +124,14 @@ function quoteAndAt() {
 
 function memoryRules() {
   return [
-    '【轻量记忆：偶尔用，别当笔记本】',
-    '- memory_append 只用来记录"对某位群友的长期印象"（他的说话风格、爱玩的梗、雷点、身份关系等稳定信息）；这些内容下次运行会自动出现在【记忆】里。',
-    '- 不要记临时话题、临时想法；只记以后跟这个人打交道还用得上的。印象过时/不再准确时用 memory_remove 删掉。',
-    '- 每次扫一眼【记忆】，只有自然相关才主动提起；不要为了用记忆而硬聊旧话题。'
+    '【记忆：只记长期、可复用、有证据的事】',
+    '- 写之前先 memory_query 查一遍：已经有同义/更准确的说法就跳过，不要重复记；发现旧印象过时/矛盾，用 memory_remove 删掉或改成新的。',
+    '- 只记稳定的东西：称呼与身份关系、长期偏好/雷点、正在进行的约定或承诺、群内固定梗、和某人的相处方式。',
+    '- 不记：一次性的情绪、临时话题、复述聊天、你的猜测、从玩笑里脑补的人设、住址/电话/账号/密钥等敏感信息。',
+    '- 必须落到具体的人：用消息行里的 (QQ:数字) 作为 userId；只有昵称、没有 QQ 号时先 get_active_members 查，别只写名字。',
+    '- 一次运行最多记 1~2 条；没有值得记的就不要调用工具。宁可少记，也不要记错。',
+    '- 【记忆】是参考不是事实：不确定就说不确定，别拿旧印象硬套；每次扫一眼，只有自然相关才提，不要为了用记忆而硬聊旧话题。',
+    '- 需要很久以前的具体事（不是【记忆】里这几条）时，用 memory_query 主动查，再回答。'
   ].join('\n');
 }
 
@@ -819,7 +823,17 @@ export function buildUserPrompt(ctx) {
       if (m.senderId && !m.self) relevantUserIds.add(String(m.senderId));
     }
   }
-  const memText = ctx.memory.formatForPrompt(ctx.chatKey, { userIds: [...relevantUserIds] });
+  // 记忆检索的查询词：本批触发消息 + 最近几条已读，用于把"不在本窗口但强相关"的
+  // 旧印象也带进来（例如有人突然提到很久以前约好的一件事）。只做字符/词重叠，
+  // 不额外调模型，成本为零。
+  const memoryQuery = [
+    ...(ctx.triggerEntries || []).map((e) => String(e?.text || '')),
+    ...((past?.messages || []).slice(-8).map((m) => String(m?.text || '')))
+  ].join('\n');
+  const memText = ctx.memory.formatForPrompt(ctx.chatKey, {
+    userIds: [...relevantUserIds],
+    queryText: memoryQuery
+  });
 
   // 记忆段（锚定模式的字节前缀从这段开始跨轮不变）
   if (memText) parts.push(`【记忆】\n${memText}`);

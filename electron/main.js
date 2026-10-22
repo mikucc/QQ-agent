@@ -106,7 +106,18 @@ process.env.QQ_AGENT_DATA_DIR = resolveDataDir();
 //   2. network_sandbox.cc: "Failed to grant sandbox access" → 一串 0x5 拒绝访问。
 // 修复：userData 一律放应用自己的 data/ 下（与业务数据同源、同备份路径），
 // 不再依赖 %APPDATA% 的可写性。app.setPath 必须在 app ready 之前调用。
-app.setPath('userData', path.join(process.env.QQ_AGENT_DATA_DIR, 'electron-user-data'));
+//
+// ⚠️ 2026-10-20：app.setPath 要求目标目录**已经存在**（不存在会抛 Error）。
+// 全新 clone 里没有 data/，于是启动在 setPath 这一步就挂了 —— 终端上只看到
+// 回到提示符，窗口永远不出现（Electron 是 GUI 子系统，控制台还看不到报错）。
+// 所以先递归建目录，再 setPath。
+const USER_DATA_DIR = path.join(process.env.QQ_AGENT_DATA_DIR, 'electron-user-data');
+try {
+  fs.mkdirSync(USER_DATA_DIR, { recursive: true });
+} catch (error) {
+  console.error('[data] 创建 userData 目录失败:', error?.message ?? error);
+}
+app.setPath('userData', USER_DATA_DIR);
 
 // ── 启动诊断（2026-09-23）：逐阶段写 data/boot-diag.log，排查"双击后毫无反应" ──
 // appendFileSync 同步落盘：进程秒退/被强杀时日志也不会丢。问题解决后可整体删除。

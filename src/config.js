@@ -326,7 +326,14 @@ export const DEFAULT_CONFIG = {
     consolidateMinIntervalMs: 21600000,  // 默认 6 小时
     useChatModel: true,                   // true = 整理模型跟随聊天模型；false = 使用下方专用模型
     provider: '',                         // 专用模型所属提供商 id（useChatModel=false 时生效）
-    model: ''                             // 专用模型 id（useChatModel=false 时生效）
+    model: '',                            // 专用模型 id（useChatModel=false 时生效）
+    // 自动读取上限：每个相关群友最多注入几条印象 / 整段记忆最多多少字符。
+    // 相关成员按"关键词相关度 + 新近度"排序；不在本窗口但强相关的人只带 2 条。
+    injectMaxPerMember: 6,
+    injectMaxChars: 2600,
+    // 自动整理触发：全群印象总数超过该值，或任一成员超过 maxImpressionsPerMember
+    consolidateMinImpressions: 4,
+    maxImpressionsPerMember: 5
   },
   // 工具与技能（skill 化开关）
   //

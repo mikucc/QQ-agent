@@ -74,6 +74,40 @@ function loadMeta(chatKey) {
   return { lastConsolidatedAt: Number(raw?.lastConsolidatedAt) || 0 };
 }
 
+/**
+ * 记忆检索用的轻量分词：英文/数字按词，中文按 2 字片段。
+ * 只用于"把不在本窗口、但和这次话题相关的旧印象带进来"，不调模型、零成本。
+ */
+function memoryTokens(text) {
+  const s = String(text || '').toLowerCase();
+  const out = new Set();
+  for (const w of s.match(/[a-z0-9_]{2,}/g) || []) out.add(w);
+  for (const seg of s.replace(/[^\u4e00-\u9fff]+/g, ' ').split(/\s+/)) {
+    if (seg.length < 2) continue;
+    for (let i = 0; i + 1 < seg.length; i += 1) out.add(seg.slice(i, i + 2));
+  }
+  return out;
+}
+
+/** 一条印象和本次查询的词重叠数。 */
+function memoryRelevance(text, tokens) {
+  if (!tokens.size) return 0;
+  const s = String(text || '').toLowerCase();
+  let hit = 0;
+  for (const t of tokens) if (s.includes(t)) hit += 1;
+  return hit;
+}
+
+/**
+ * 记忆自动读取：按"窗口内成员 + 话题相关性"挑印象。
+ *
+ * 旧实现只取每个成员最后 3 条，而且只带本窗口内的人 —— 两个后果：
+ *   · 很早以前约好的重要事情被挤出最后 3 条，模型永远看不到；
+ *   · 突然提到某个不在本窗口的人/话题时，相关旧印象带不进来，只能靠模型
+ *     自己想起来调 memory_query（它经常不调）。
+ * 现在：窗口内成员按"关键词相关性 + 新近度"取最多 N 条；窗口外成员只有
+ * 和本次话题强相关（至少 2 个词重叠）才带最相关 2 条；总长度有上限。
+ */
 export class MemoryStore {
   constructor() {
     this.cache = new Map(); // chatKey -> Map(userId|_n_xx, member)
@@ -208,9 +242,17 @@ export class MemoryStore {
       content: String(content ?? '').slice(0, 300),
       createdAt: Number(createdAt) || Date.now()
     };
-    if (!member.impressions.some((e) => e.content === entry.content)) {
+    const norm = (s) => String(s ?? '').toLowerCase().replace(/[\s\p{P}\p{S}]+/gu, '');
+    const target = norm(entry.content);
+    const dup = target ? member.impressions.find((e) => norm(e.content) === target) : null;
+    if (dup) {
+      // 同义重复不新增，只刷新"再次被确认"的时间（排序时仍以首次为准）
+      dup.confirmedAt = Date.now();
+    } else {
       member.impressions.push(entry);
     }
+    // 单成员上限：防止同一个人反复被记成几十条；整理/排序仍能保留最近 30 条
+    if (member.impressions.length > 30) member.impressions = member.impressions.slice(-30);
     member.userId = String(userId ?? member.userId ?? '');
     member.name = String(name || member.name || '');
     member.updatedAt = Date.now();
@@ -452,21 +494,58 @@ export class MemoryStore {
    * 生成提示词里的【对群友的印象】摘要。
    * opts.userIds 提供时只包含这些成员（相关成员注入，控制 token）。
    */
-  formatForPrompt(chatKey, { userIds = null } = {}) {
+  formatForPrompt(chatKey, { userIds = null, queryText = '', maxPerMember = 6, maxChars = 2600 } = {}) {
     const notes = getConfig().memberNotes || {};
+    const cfg = getConfig().memory || {};
+    const per = Math.max(1, Math.min(20, Number(cfg.injectMaxPerMember) || maxPerMember));
+    const cap = Math.max(500, Math.min(8000, Number(cfg.injectMaxChars) || maxChars));
     const all = this.members(chatKey);
     if (!all.length) return '';
     const filter = userIds ? new Set([...userIds].map(String)) : null;
-    const picked = filter
-      ? all.filter((m) => !m.userId || filter.has(String(m.userId)))  // 无 QQ 号的旧数据始终带上
-      : all.slice(0, 15);
-    if (!picked.length) return '';
-    const lines = ['【对群友的印象】'];
-    for (const m of picked) {
-      const who = notes[String(m.userId)] || m.name || String(m.userId || '') || '某人';
-      for (const e of m.impressions.slice(-3)) lines.push(`- ${who}：${e.content}`);
+    const tokens = memoryTokens(queryText);
+    const now = Date.now();
+    const picked = [];
+
+    for (const m of all) {
+      const uid = String(m.userId || '');
+      const inWindow = !filter || !uid || filter.has(uid);   // 无 QQ 号的旧数据始终带上
+      const imps = (m.impressions || []).map((e) => {
+        const rel = memoryRelevance(e.content, tokens);
+        const ageDays = Math.max(0, (now - Number(e.createdAt || 0)) / 86400000);
+        return { ...e, rel, score: rel * 3 + 1 / (1 + ageDays / 30) };
+      });
+      const matched = imps.filter((e) => e.rel > 0)
+        .sort((a, b) => b.rel - a.rel || (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0));
+      const rest = imps.filter((e) => e.rel === 0)
+        .sort((a, b) => (Number(b.createdAt) || 0) - (Number(a.createdAt) || 0));
+      let pick;
+      if (inWindow) {
+        pick = [...matched, ...rest].slice(0, per);
+      } else if (matched.length && matched[0].rel >= 2) {
+        // 不在本窗口、但和这次话题强相关：只带最相关 2 条，避免无关记忆污染
+        pick = matched.slice(0, 2);
+      } else {
+        continue;
+      }
+      if (!pick.length) continue;
+      picked.push({ m, pick, inWindow, best: Math.max(...pick.map((e) => e.score)) });
     }
-    return lines.join('\n');
+
+    // 窗口内的人优先；同层按相关度/新近度排序
+    picked.sort((a, b) => (Number(b.inWindow) - Number(a.inWindow)) || (b.best - a.best));
+    const lines = ['【对群友的印象】'];
+    let chars = lines[0].length;
+    for (const { m, pick } of picked) {
+      const who = notes[String(m.userId)] || m.name || String(m.userId || '') || '某人';
+      for (const e of pick) {
+        const line = `- ${who}：${e.content}`;
+        if (chars + line.length + 1 > cap) break;
+        lines.push(line);
+        chars += line.length + 1;
+      }
+      if (chars >= cap) break;
+    }
+    return lines.length > 1 ? lines.join('\n') : '';
   }
 
   // ── 自动整理（consolidation）──
