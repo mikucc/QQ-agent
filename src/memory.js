@@ -497,7 +497,9 @@ export class MemoryStore {
   formatForPrompt(chatKey, { userIds = null, queryText = '', maxPerMember = 6, maxChars = 2600 } = {}) {
     const notes = getConfig().memberNotes || {};
     const cfg = getConfig().memory || {};
-    const per = Math.max(1, Math.min(20, Number(cfg.injectMaxPerMember) || maxPerMember));
+    // 私聊 = 跟主人聊：多带几条（"记得你"更明显）；群聊保持原样，控制 token
+    const isPrivate = String(chatKey || '').startsWith('private:');
+    const per = Math.max(1, Math.min(20, (Number(cfg.injectMaxPerMember) || maxPerMember) + (isPrivate ? 4 : 0)));
     const cap = Math.max(500, Math.min(8000, Number(cfg.injectMaxChars) || maxChars));
     const all = this.members(chatKey);
     if (!all.length) return '';

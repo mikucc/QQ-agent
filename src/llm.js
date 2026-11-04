@@ -80,6 +80,36 @@ function effectiveApi() {
  *   · 备选模型降级也不受影响（overrides 已由候选序列给出）
  * 这样"切专用模型"不会意外覆盖用户明确指定的模型。
  */
+/**
+ * 找出某个模型 id 属于哪个提供商（图片/视频专用模型可能配在**另一条渠道**上）。
+ *
+ * 背景：specializedModelFor 只换模型名、不换 baseUrl。如果 visionModel 填的是
+ * 别家渠道的 id（例如 opencode 通道 + 填了 deepseek.com 的 deepseek-flash），
+ * 请求就会带着错的名字发到错的地方，网关回 400 "Model is unavailable"——
+ * 表现成"模型不支持图片"，其实是路由错了（2026-11-04 实测）。
+ *
+ * 返回 null 表示"不用切"（同渠道，或找不到归属），调用方保持原端点。
+ */
+function endpointForModel(modelId) {
+  try {
+    const cfg = getConfig();
+    const id = String(modelId || '').trim();
+    if (!id) return null;
+    const mainBase = String(cfg.api?.baseUrl || '').trim().replace(/\/+$/, '');
+    for (const p of cfg.providers || []) {
+      const models = Array.isArray(p?.models) ? p.models : [];
+      if (!models.includes(id)) continue;
+      const base = String(p?.baseURL || '').trim().replace(/\/+$/, '');
+      if (!base || base === mainBase) return null;   // 同渠道：只换模型名即可
+      const key = String(cfg.dshProviderKeys?.[p.id] ?? p.apiKey ?? '').trim();
+      return { baseUrl: base, apiKey: key === '******' ? '' : key, provider: String(p.id || '') };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 function specializedModelFor(messages, cfg) {
   if (!Array.isArray(messages)) return '';
   let hasImage = false;
@@ -168,6 +198,12 @@ export function isRetryableError(error) {
 
   // 主动中止（用户/系统取消）：重试没有意义
   if (/aborted|中止|已取消|cancel/i.test(msg)) return false;
+
+  // 网关把**上游故障**包成 400 是常见做法，典型如 opencode.ai：
+  //   HTTP 400 {"error":{"type":"server_error","message":"Upstream request failed: Model is unavailable."}}
+  // 这不是参数错（参数错是 invalid_request_error / invalid_request），重试和切备选都有意义。
+  // 必须先于下面的 4xx 判定 —— 否则一次上游抖动就被当成"客户端错误"直接放弃。
+  if (/server_error|upstream request failed|model is unavailable|upstream (error|timeout|unavailable)|bad gateway|gateway timeout|service unavailable/i.test(msg)) return true;
 
   // 明确的客户端错误：重试也不会变好，只会白烧额度
   if (/HTTP\s*(401|400|403|404|405|409|413|422)/i.test(msg)) return false;
@@ -293,7 +329,12 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
       skillManager.recordError('account-pool', error);
     }
     const forced = specializedModelFor(messages, getConfig());
-    if (forced && forced !== api.model) api = { ...api, model: forced };
+    if (forced && forced !== api.model) {
+      // 专用模型可能在另一条渠道上：连 baseUrl/apiKey 一起切，否则会把别家的
+      // 模型名发到当前网关，得到 400 "Model is unavailable"（看着像"不支持图片"）。
+      const endpoint = endpointForModel(forced);
+      api = endpoint ? { ...api, ...endpoint, model: forced } : { ...api, model: forced };
+    }
   }
   const ctx = skillContext || { api, model: api.model, messages };
 
@@ -439,7 +480,12 @@ export async function chatCompletion({ messages, tools = null, toolChoice = 'aut
     if (poolAccountId) {
       reportPoolFeedback({ accountId: poolAccountId, ok: false, status: res.status, error: res.text.slice(0, 300) });
     }
-    throw new Error(`模型 API HTTP ${res.status}：${res.text.slice(0, 500)}`);
+    // 模型不可用是最常见的"看起来像 400、其实是上游"的一种，补一句能直接照做的提示，
+    // 否则用户只看到一段英文 JSON，不知道该改模型还是改 Key。
+    const unavailableHint = /model is unavailable|upstream request failed/i.test(res.text)
+      ? '（该渠道当前不提供这个模型：换一个模型，或在 config.json 的 api.fallbackModels 里配一个备选）'
+      : '';
+    throw new Error(`模型 API HTTP ${res.status}：${res.text.slice(0, 500)}${unavailableHint}`);
   }
 
   // ── "返回了无法解析的 JSON" 根因治理 ──

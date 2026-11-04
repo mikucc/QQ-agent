@@ -1,0 +1,54 @@
+{
+  "id": "mood",
+  "name": "心情",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "category": "knowledge",
+  "description": "给角色一份全局、跨群一致的心情：valence / arousal / energy / socialBattery。每天第一次运行时用模型参考昨天日记和心情做初始化，之后按聊天内容轻量调整；每轮注入【你此刻的状态】。低心情/低电量时，普通唤醒有最多 5% 概率沉默，主动开话题有最多 10% 概率被抑制（1:2）。@/回复/拍一拍/叫名字不受沉默概率影响，只会变短。",
+  "author": "本地",
+  "entry": "index.js",
+  "enabledByDefault": true,
+  "capabilities": ["mood.current", "proactive.gate", "status.mood"],
+  "requires": [],
+  "permissions": [],
+  "settings": {
+    "enabled": true,
+    "dailyInit": true,
+    "replySuppressChance": 0.05,
+    "proactiveSuppressChance": 0.10,
+    "lowMoodThreshold": 0.5,
+    "maxCauses": 3
+  },
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用心情",
+      "description": "关掉后不再初始化、更新、注入；已存状态保留。"
+    },
+    "dailyInit": {
+      "type": "boolean",
+      "label": "每天用模型初始化",
+      "description": "每天第一次运行读昨天日记/心情，用主模型生成今天的 baseline；失败时退回规则。"
+    },
+    "replySuppressChance": {
+      "type": "number",
+      "label": "普通回复沉默概率上限",
+      "description": "默认 0.05（5%）。只在低心情/低电量时生效，硬相关（@/回复/拍一拍/叫名字）不受影响。"
+    },
+    "proactiveSuppressChance": {
+      "type": "number",
+      "label": "主动消息抑制概率上限",
+      "description": "默认 0.10（10%）。和普通回复保持 1:2；只在低心情/低电量时生效。"
+    },
+    "lowMoodThreshold": {
+      "type": "number",
+      "label": "低心情阈值",
+      "description": "默认 0.5。心情分低于此值，或社交电量/精力极低时，才计算沉默概率；不是一整天都按最大值。"
+    },
+    "maxCauses": {
+      "type": "number",
+      "label": "最多保留几条心情原因",
+      "description": "默认 3。只影响提示词里为什么是这个心情。"
+    }
+  }
+}

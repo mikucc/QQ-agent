@@ -1,0 +1,167 @@
+{
+  "id": "image-studio",
+  "name": "生图工作室",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "category": "media",
+  "description": "本地参考库（人物/服饰/场景/道具）+ 生图接口：模型判断该发图时，按画面描述组合参考图，调用 OpenAI 兼容的 /images 接口或 65535 异步任务接口，生成后直接发到当前 QQ 会话。",
+  "author": "本地",
+  "entry": "index.js",
+  "enabledByDefault": true,
+  "capabilities": [
+    "image.generate"
+  ],
+  "requires": [],
+  "permissions": [],
+  "settings": {
+    "enabled": true,
+    "injectGuide": true,
+    "policy": "smart",
+    "provider": "openai",
+    "baseUrl": "https://api.openai.com/v1",
+    "apiKey": "",
+    "model": "gpt-image-1",
+    "size": "1024x1024",
+    "aspect": "1:1",
+    "quality": "",
+    "timeoutMs": 180000,
+    "maxRefs": 6,
+    "refsPerCharacter": 1,
+    "autoMatch": true,
+    "cooldownMin": 30,
+    "maxPerHour": 6,
+    "maxPerDay": 20,
+    "stylePrompt": "日系动画插画，干净线条，柔和配色，自然光，角色保持一致",
+    "extraHeaderName": "",
+    "extraHeaderValue": "",
+    "requestCooldownMin": 2,
+    "requestMaxPerHour": 12,
+    "requestMaxPerDay": 40
+  },
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用生图",
+      "description": "关掉后工具仍可见但不会调用接口。"
+    },
+    "injectGuide": {
+      "type": "boolean",
+      "label": "注入发图说明",
+      "description": "把“什么时候发图”和参考库目录写进系统提示。"
+    },
+    "policy": {
+      "type": "string",
+      "label": "发图策略",
+      "description": "smart：用户明确要图，或聊天氛围适合时主动发；explicit：只有用户明确要图才发；off：只保留工具不主动。",
+      "enum": [
+        "smart",
+        "explicit",
+        "off"
+      ]
+    },
+    "provider": {
+      "type": "string",
+      "label": "接口类型",
+      "description": "openai：OpenAI 兼容 /images/generations 与 /images/edits；65535：原生异步 /v1/tasks。",
+      "enum": [
+        "openai",
+        "65535"
+      ]
+    },
+    "baseUrl": {
+      "type": "string",
+      "label": "Base URL",
+      "description": "例如 https://api.openai.com/v1 或 https://api.65535.space。"
+    },
+    "apiKey": {
+      "type": "string",
+      "label": "API Key",
+      "description": "只保存在本机 data/config.json，不会出现在聊天里。"
+    },
+    "model": {
+      "type": "string",
+      "label": "模型",
+      "description": "OpenAI 兼容用 gpt-image-1；65535 填它支持的模型 id。"
+    },
+    "size": {
+      "type": "string",
+      "label": "默认尺寸",
+      "description": "如 1024x1024；aspect 有映射时优先用 aspect。"
+    },
+    "aspect": {
+      "type": "string",
+      "label": "默认画幅",
+      "description": "1:1 / 3:4 / 4:3 / 9:16 / 16:9，或直接写 1024x1536。"
+    },
+    "quality": {
+      "type": "string",
+      "label": "质量（可选）",
+      "description": "如 high / medium / low；留空用接口默认。"
+    },
+    "timeoutMs": {
+      "type": "number",
+      "label": "超时（毫秒）",
+      "description": "默认 180000。"
+    },
+    "maxRefs": {
+      "type": "number",
+      "label": "最多参考图",
+      "description": "默认 6；人物最多 2 张，其余每项 1 张。"
+    },
+    "refsPerCharacter": {
+      "type": "number",
+      "label": "每个人物最多参考图",
+      "description": "默认 1，最大 2。"
+    },
+    "autoMatch": {
+      "type": "boolean",
+      "label": "自动识别画面里的库名字",
+      "description": "画面描述提到人物/服饰/场景/道具名字时自动带参考图。"
+    },
+    "cooldownMin": {
+      "type": "number",
+      "label": "同一会话主动发图间隔（分钟）",
+      "description": "默认 30；用户明确要图不受此限制。"
+    },
+    "maxPerHour": {
+      "type": "number",
+      "label": "每小时最多生成",
+      "description": "默认 6。"
+    },
+    "maxPerDay": {
+      "type": "number",
+      "label": "每天最多生成",
+      "description": "默认 20。"
+    },
+    "stylePrompt": {
+      "type": "string",
+      "label": "画风",
+      "description": "写进每次生图提示词的固定画风。",
+      "multiline": true
+    },
+    "extraHeaderName": {
+      "type": "string",
+      "label": "额外请求头名（可选）",
+      "description": "某些网关需要 x-api-key 之类；留空不用。"
+    },
+    "extraHeaderValue": {
+      "type": "string",
+      "label": "额外请求头值（可选）"
+    },
+    "requestCooldownMin": {
+      "type": "number",
+      "label": "用户要图的最短间隔（分钟）",
+      "description": "用户明确要求发图时的冷却。默认 2 分钟，比主动发图的 30 分钟宽松。"
+    },
+    "requestMaxPerHour": {
+      "type": "number",
+      "label": "用户要图·每小时上限",
+      "description": "默认 12 张。主动发图仍用 maxPerHour。"
+    },
+    "requestMaxPerDay": {
+      "type": "number",
+      "label": "用户要图·每天上限",
+      "description": "默认 40 张。防止被无限刷图烧钱。"
+    }
+  }
+}

@@ -24,7 +24,17 @@ async function check(name, fn) {
 }
 
 const env = await bootApp({
-  config: { store: { contextSliderPos: 0, historyCount: 80 }, wakeDelayMs: 400 }
+  config: {
+    store: { contextSliderPos: 0, historyCount: 80 },
+    wakeDelayMs: 400,
+    // 日程生成 / 记忆抽取 / 心情初始化都会自己调模型，抢走 mock 的脚本响应，
+    // 让"第 1 次请求就是聊天请求"的断言失效。本套只测触发链路，显式关掉。
+    skills: {
+      'daily-schedule': { enabled: false },
+      'plastic-memory': { enabled: false },
+      mood: { enabled: false }
+    }
+  }
 });
 const { app, pushGroupMsg, llm, request } = env;
 const unread = () => app.store.getChatMeta('group:456').unread;

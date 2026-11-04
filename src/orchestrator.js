@@ -19,6 +19,8 @@ import { currentProviders } from './providers.js';
 import { skillManager } from './skills/manager.js';
 import { getToolAvailability } from './tool-registry.js';
 import { rescueUnsentReply } from './reply-rescue.js';
+import { prepareForRun as prepareDialogueState, recordRun as recordDialogueState } from './dialogue-state.js';
+import * as followupStore from './followups.js';
 
 export class Orchestrator {
   constructor({ store, memory, stickers, sender, sessions, onebot, emit = null, reminders = null, videoReader = null }) {
@@ -67,6 +69,7 @@ export class Orchestrator {
     this.paused = false;
     this.pauseReason = null;
     this.proactiveTimer = null;
+    this.selfCardCache = new Map();    // chatId -> { card, at }（她在该群的群名片，注意力门用）
     this.aborted = false;
     this.reminderTimer = null;         // 提醒调度定时器
     this.reminderFiring = new Set();   // 防止同一提醒并发触发
@@ -345,7 +348,7 @@ export class Orchestrator {
 
   // ── 核心循环 ───────────────────────────────────────────────────────────
 
-  async wake(chatKey, { proactive = false, waitingSessionId = null, reuseSessionId = null } = {}) {
+  async wake(chatKey, { proactive = false, proactiveReason = null, waitingSessionId = null, reuseSessionId = null } = {}) {
     if (this.aborted) { if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted'); return; }
     if (this.paused && !proactive) { if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted'); return; }
     if (this.runningChats.has(chatKey)) return;
@@ -498,6 +501,29 @@ export class Orchestrator {
         if (waitingSessionId) this.#finishWaiting(waitingSessionId, 'aborted');
         return; // 没有未读就不空跑
       }
+
+      // ── 注意力门（只群聊）────────────────────────────────────────────
+      // 批次已经 drain 出来、模型还没调用；插件在这里决定「这批值不值得醒」。
+      // 不通过：标已读、丢弃等待会话、直接返回，不建运行会话、不烧 token。
+      // 私聊在 #attentionGate 里直接放行；没有插件时也直接放行。
+      //
+      // ⚠️ 4 档（全响应）/ 活跃期必须跳过这道门：这两者的语义就是"任何消息都响应"，
+      //    再让"刚醒过 N 秒""兴趣分不够"去否决，会出现"设置写着全响应、实际不回"
+      //    的语义冲突（2026-11 触发链路测试抓到）。
+      const tierNow = Number((storeConfigForChat(chatKey) || {}).contextTier);
+      const gateBypassed = (Number.isFinite(tierNow) && tierNow >= 4) || Boolean(this.#activeState(chatKey));
+      const attention = gateBypassed
+        ? { wake: true, reason: '全响应/活跃期，跳过注意力门' }
+        : await this.#attentionGate({ chatKey, entries: triggerEntries });
+      if (!attention.wake) {
+        for (const m of triggerEntries) {
+          try { this.store.markEntryRead(chatKey, m.id); } catch { /* ignore */ }
+        }
+        if (waitingSessionId) this.#discardWaiting(waitingSessionId);
+        console.log(`[orchestrator] ${chatKey} 注意力门沉默：${attention.reason || '不相关/不感兴趣'}`);
+        this.emit('chat-update', chatKey);
+        return;
+      }
     } else {
       // 主动机会：不打扰、无触发批，只带状态
       this.store.drainUnread(chatKey); // 把可能的零星未读一并处理掉
@@ -587,7 +613,7 @@ export class Orchestrator {
     try {
       for (let attempt = 1; attempt <= MAX_SESSION_ATTEMPTS; attempt++) {
         try {
-          await this.#runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit: effectiveTier.count, tierInfo: effectiveTier, activeTopic: activeState ? activeState.topic : null });
+          await this.#runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, proactiveReason, seq, contextLimit: effectiveTier.count, tierInfo: effectiveTier, activeTopic: activeState ? activeState.topic : null, activeTopicUntil: activeState ? activeState.until : 0 });
           lastError = null;
           break;
         } catch (error) {
@@ -633,6 +659,28 @@ export class Orchestrator {
       this.runningChats.delete(chatKey);
       this.emit('chat-update', chatKey);
     }
+
+    // 对话状态卡：记下"我最后说了什么"，并判断这句是不是在等对方回答。
+    // 只在真的发过言时写（noreply/error 不动上一次的现场，避免把状态写空）。
+    if (session && Array.isArray(session.sent) && session.sent.length) {
+      try {
+        recordDialogueState({ chatKey, sent: session.sent, triggerEntries });
+      } catch { /* 状态卡失败不影响主流程 */ }
+    }
+
+    // 约定 / 待办：只有触发消息里出现"明天/答应/说好/回头"这类词时才花一次模型调用去抽，
+    // 避免每轮都多一次请求。抽到的事会在到点后由 proactiveTick 主动问。
+    try {
+      if (getConfig().proactive?.followupEnabled !== false) {
+        const triggerText = (triggerEntries || []).map((e) => String(e?.text || '')).join('\n');
+        if (followupStore.looksLikePromise(triggerText)) {
+          const dialogue = [...(triggerEntries || []), ...(session?.sent || [])]
+            .map((m) => `${m?.self ? '我' : (m?.senderName || m?.senderId || '对方')}: ${String(m?.text || '').slice(0, 200)}`)
+            .join('\n');
+          void followupStore.extractFollowups({ chatKey, dialogue, triggerEntries }).catch(() => {});
+        }
+      }
+    } catch { /* 抽取失败不影响聊天 */ }
 
     // drain：运行期间来的新消息 → 再次新开会话处理（这是"确保看到所有发言"的关键）
     if (!this.aborted && !this.paused) {
@@ -691,6 +739,54 @@ export class Orchestrator {
     }
   }
 
+  /**
+   * 注意力门：唤醒前问插件「这一批值不值得跑模型」。
+   *
+   * 只给群聊用（私聊永远唤醒）。没有插件 / 插件报错 / 返回不明确时一律
+   * fail-open 返回 wake:true —— 记忆/行为插件坏了，不能把聊天整个吞掉。
+   *
+   * 注意：这里只做本地判断，绝不能调模型；否则省成本的目的就没了。
+   */
+  async #attentionGate({ chatKey, entries = [] } = {}) {
+    if (!String(chatKey).startsWith('group:')) return { wake: true, reason: '私聊不判定' };
+    const chatId = String(chatKey).split(':')[1] || '';
+    const fn = this.#capFirst('message.attention', { chatKey, kind: 'group', entries });
+    if (!fn) return { wake: true, reason: '没有注意力插件' };
+    const selfCard = await this.#selfGroupCard(chatId);
+    try {
+      const r = await fn({
+        chatKey,
+        kind: 'group',
+        chatId,
+        entries,
+        selfId: String(this.onebot?.selfId || ''),
+        selfCard
+      });
+      if (r && r.wake === false) {
+        return { wake: false, reason: String(r.reason || ''), score: r.score };
+      }
+      return { wake: true, reason: String(r?.reason || '') };
+    } catch (error) {
+      console.warn('[orchestrator] 注意力门失败（按唤醒处理）：', error?.message ?? error);
+      return { wake: true, reason: '注意力门异常' };
+    }
+  }
+
+  /** 她在当前群的群名片（缓存 10 分钟；失败也缓存，避免每条消息都打协议端）。 */
+  async #selfGroupCard(chatId) {
+    if (!chatId) return '';
+    const now = Date.now();
+    const cached = this.selfCardCache.get(chatId);
+    if (cached && now - cached.at < 10 * 60 * 1000) return cached.card;
+    let card = '';
+    try {
+      const info = await this.onebot.getGroupMemberInfo(chatId, this.onebot.selfId);
+      card = String(info?.card || '').trim();
+    } catch { /* 协议端不支持/查询失败：不阻塞注意力门 */ }
+    this.selfCardCache.set(chatId, { card, at: now });
+    return card;
+  }
+
   /** 给"正文裁判"用的模型参数：沿用当前聊天的主模型，不另开一份配置。 */
   #judgeApi() {
     const api = getConfig().api || {};
@@ -729,7 +825,38 @@ export class Orchestrator {
     });
   }
 
-  async #runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, seq, contextLimit = null, tierInfo = null, activeTopic = null }) {
+  /** 口头禅过载提醒：一天里"唔/嗯/诶"开头的发言占比过高时，提示换开头。 */
+  #ticHint(chatKey) {
+    try {
+      const dayStart = new Date();
+      dayStart.setHours(0, 0, 0, 0);
+      const items = this.store.recent(chatKey, { limit: 200 }) || [];
+      const mine = items.filter((m) => m.self && Number(m.ts) >= dayStart.getTime() && String(m.text || '').trim());
+      if (mine.length < 6) return '';
+      const tic = mine.filter((m) => /^[唔嗯呃诶哦啊]/.test(String(m.text).trim())).length;
+      if (tic / mine.length < 0.25) return '';
+      return `（你今天 ${mine.length} 条发言里有 ${tic} 条用"唔/嗯/诶"开头，口头禅太密。这一条换个开头，或者干脆不挂语气词直接说。）`;
+    } catch {
+      return '';
+    }
+  }
+
+  /** 主动机会要注入的"为什么现在开口"。 */
+  #proactiveInstruction(reason) {
+    if (reason?.type === 'followup' && reason.item) {
+      const it = reason.item;
+      const who = it.whoName || '对方';
+      return [
+        '【主动机会·之前约好的事】',
+        `你和${who}之前约过 / 你答应过：${it.what}（约的是${it.dueText || '刚才'}）。`,
+        '现在到点了，可以自然地问他一句进展，像朋友想起来随口问，不要像提醒机器人：',
+        '不要提"待办""任务""提醒""日程"这些词，也别道歉说"我忘了"；他不接就换话题，或者安静结束。'
+      ].join('\n');
+    }
+    return '【未读信息】（主动机会）群里已经安静了一会儿。你可以主动抛一个自然的话题（像随口说的，不要像播报），也可以判断没必要说话就安静结束。';
+  }
+
+  async #runAgent(session, { kind, chatId, chatKey, triggerEntries, proactive, proactiveReason = null, seq, contextLimit = null, tierInfo = null, activeTopic = null, activeTopicUntil = 0 }) {
     const cfg = getConfig();
     // 开一轮新运行：清空回复安全网的候选草稿池（草稿只在"这一次运行"内有意义，
     // 跨运行留着会把上一次的句子当成这次可以发的原句）。
@@ -820,7 +947,20 @@ export class Orchestrator {
         ? [{ id: 'owner-rules-run', title: '', priority: 72, content: ownerRules }]
         : []
     });
-    const userPrompt = buildUserPrompt({
+    // ── 对话状态卡 ──
+    // 每次运行都是全新会话，模型看不到"我上一句说了什么 / 在等谁回 / 哪件事没聊完"。
+    // 这里补一段 ≤160 字的现场（2 小时 / 30 分钟过期，宁缺勿错），
+    // 让"刚说过的话再问一遍、对方没接还追问"这类断层少一些。
+    let dialogueStateText = '';
+    try {
+      dialogueStateText = prepareDialogueState({
+        chatKey,
+        triggerEntries,
+        topic: activeTopic || '',
+        topicUntil: activeTopicUntil || 0
+      });
+    } catch { /* 状态卡失败不影响主流程 */ }
+    let userPrompt = buildUserPrompt({
       chatKey, kind, chatId, chatName,
       triggerEntries,
       store: this.store,
@@ -833,12 +973,17 @@ export class Orchestrator {
       contextLimit,
       tierInfo,
       skillContext,
+      dialogueStateText,
       // 活跃模式：注入当前话题锚点（buildUserPrompt 据此渲染【活跃模式】段）
       activeTopic,
       // 提示词锚点：传入上一轮的前缀状态；新状态经 session.promptAnchorState 带回
       promptAnchor: { prev: this.promptAnchors.get(chatKey) || null },
       session
     });
+
+    // 口头禅过载：今天以"唔/嗯/诶"开头的发言太多时，给这一条加个提醒
+    const ticHint = this.#ticHint(chatKey);
+    if (ticHint) userPrompt += `\n\n${ticHint}`;
 
     session.systemPrompt = systemPrompt;
     session.userPrompt = userPrompt;
@@ -865,9 +1010,12 @@ export class Orchestrator {
 
     const messages = [
       { role: 'system', content: systemPrompt },
-      { role: 'user', content: proactive
-        ? `${userPrompt}\n\n【未读信息】（主动机会）群里已经安静了一会儿。你可以主动抛一个自然的话题（像随口说的，不要像播报），也可以判断没必要说话就安静结束。`
-        : userPrompt }
+      {
+        role: 'user',
+        content: proactive
+          ? `${userPrompt}\n\n${this.#proactiveInstruction(proactiveReason)}`
+          : userPrompt
+      }
     ];
 
     // 让 Skill 加工即将发给模型的消息（如补充知识库片段）。
@@ -1201,7 +1349,10 @@ export class Orchestrator {
             const cfgA = getConfig();
             const enabled = cfgA.chatActive?.enabled === true;
             const t = tierInfo?.tier;
-            const eligibleTier = Number.isFinite(Number(t)) && t >= 1 && t <= 3;
+            // 4 档也要允许开活跃期：4 档本来就每条都响应，活跃期不会多触发任何会话，
+            // 它唯一的增量是【活跃模式】那段话题锚点 —— 而这正是"话题不断档"需要的。
+            // 旧实现把 4 档排除在外，导致"全响应"配置下这个功能永远不生效。
+            const eligibleTier = Number.isFinite(Number(t)) && t >= 1 && t <= 4;
             const topic = String(session.activeTopic ?? '').trim();
             const reason = String(session.finishReason ?? '');
             const st = this.#activeState(chatKey);
@@ -1350,6 +1501,13 @@ export class Orchestrator {
   }
 
   // ── 主动开话题 ─────────────────────────────────────────────────────────
+  //
+  // 2026-11 重做：旧逻辑只做"掷骰子 + 随机抽冷群"，实测 5 条主动里 4 条落在凌晨、
+  // 4 条没人接。现在的顺序是：
+  //   ① 有到点的约定/待办 → 优先（问一句"你昨天说的那事怎么样了"）
+  //   ② 没有待办，才考虑随机闲聊，且必须过：时段窗、群里刚有人说话、每会话每日上限、
+  //      连续被无视后的冷却。
+  // 心情门（proactive.gate）仍然保留，只作用于②。
 
   startProactiveLoop() {
     this.stopProactiveLoop();
@@ -1360,16 +1518,112 @@ export class Orchestrator {
         Math.max(120000, Number(cfg.proactive?.checkIntervalMaxMs) || 5400000)
       );
       this.proactiveTimer = setTimeout(() => { tick().catch(() => {}); }, next);
-      if (this.aborted || this.paused || cfg.proactive?.enabled !== true) return;
-      if (this.runningChats.size >= Math.max(1, Number(cfg.maxConcurrentRuns) || 2)) return;
-      if (Math.random() > (Number(cfg.proactive?.probability) || 0.25)) return;
-      // 挑一个"安静且允许"的群
-      const candidates = this.#proactiveCandidates(cfg);
-      if (!candidates.length) return;
-      const chatKey = candidates[Math.floor(Math.random() * candidates.length)];
-      this.wake(chatKey, { proactive: true }).catch((error) => console.error('[orchestrator] proactive 出错:', error));
+      try {
+        await this.#proactiveTick(cfg);
+      } catch (error) {
+        console.warn('[orchestrator] proactive tick 失败：', error?.message ?? error);
+      }
     };
     this.proactiveTimer = setTimeout(() => { tick().catch(() => {}); }, 15000);
+  }
+
+  async #proactiveTick(cfg) {
+    if (this.aborted || this.paused || cfg.proactive?.enabled !== true) return;
+    if (this.runningChats.size >= Math.max(1, Number(cfg.maxConcurrentRuns) || 2)) return;
+    const now = Date.now();
+    if (!this.#inActiveHours(cfg, now)) return;
+    this.#settleProactiveMisses(cfg, now);
+
+    // ① 到点的约定：最像"真的有事"
+    if (cfg.proactive?.followupEnabled !== false) {
+      const dueAll = followupStore.dueChats(now);
+      for (const { chatKey, items } of dueAll) {
+        if (!this.#proactiveAllowed(cfg, chatKey, now, { ignoreIdle: true })) continue;
+        const item = items[0];
+        followupStore.markAsked(chatKey, item.id, now);
+        this.#markProactiveSent(chatKey, now);
+        console.log(`[orchestrator] ${chatKey} 到点约定：${String(item.what).slice(0, 40)}`);
+        this.wake(chatKey, { proactive: true, proactiveReason: { type: 'followup', item } })
+          .catch((error) => console.error('[orchestrator] proactive(followup) 出错:', error));
+        return;
+      }
+    }
+
+    // ② 随机闲聊（保留，但加闸）
+    if (Math.random() > (Number(cfg.proactive?.probability) || 0.25)) return;
+    const candidates = this.#proactiveCandidates(cfg).filter((k) => this.#proactiveAllowed(cfg, k, now));
+    if (!candidates.length) return;
+    const chatKey = candidates[Math.floor(Math.random() * candidates.length)];
+    // 心情门：低心情/低电量时抑制主动（最多 10%）。没有插件/报错 → 放行。
+    try {
+      const gate = this.#capFirst('proactive.gate', { chatKey });
+      if (gate) {
+        const r = await gate({
+          chatKey,
+          idleMs: Math.max(300000, Number(cfg.proactive?.idleThresholdMs) || 1800000),
+          cfg
+        });
+        if (r && r.allow === false) {
+          console.log(`[orchestrator] ${chatKey} 主动被心情抑制：${r.reason || '状态不好'}`);
+          return;
+        }
+      }
+    } catch (error) {
+      console.warn('[orchestrator] proactive.gate 失败（按允许处理）：', error?.message ?? error);
+    }
+    this.#markProactiveSent(chatKey, now);
+    this.wake(chatKey, { proactive: true, proactiveReason: { type: 'idle' } })
+      .catch((error) => console.error('[orchestrator] proactive 出错:', error));
+  }
+
+  /** 只在配置的时段内主动（跨零点也支持）。 */
+  #inActiveHours(cfg, now) {
+    const start = Math.min(23, Math.max(0, Number(cfg.proactive?.activeStartHour ?? 9)));
+    const end = Math.min(24, Math.max(0, Number(cfg.proactive?.activeEndHour ?? 23)));
+    const h = new Date(now).getHours();
+    return start <= end ? (h >= start && h < end) : (h >= start || h < end);
+  }
+
+  /** 主动的准入闸：冷却 / 每日上限 / 刚刚有人说话 / 有未读。 */
+  #proactiveAllowed(cfg, chatKey, now, { ignoreIdle = false } = {}) {
+    if (!chatKey || this.runningChats.has(chatKey)) return false;
+    const meta = followupStore.getChatMeta(chatKey);
+    if (meta.cooldownUntil && now < Number(meta.cooldownUntil)) return false;
+    const gapMs = Math.max(1, Number(cfg.proactive?.dailyMaxPerChat ?? 1)) * 20 * 3600000;
+    if (meta.lastAt && now - Number(meta.lastAt) < gapMs) return false;
+    const chatMeta = this.store.getChatMeta(chatKey);
+    if (Number(chatMeta.unread) > 0) return false;
+    const quietMs = Math.max(0, Number(cfg.proactive?.quietMinutesAfterActivity ?? 5)) * 60000;
+    if (!ignoreIdle && quietMs && now - Number(chatMeta.lastTs || 0) < quietMs) return false;
+    return true;
+  }
+
+  /** 记下"这次主动发出去了"，30 分钟后结算有没有人接。 */
+  #markProactiveSent(chatKey, now) {
+    followupStore.patchChatMeta(chatKey, { lastAt: now, pendingAt: now });
+  }
+
+  /** 结算上一条主动：有人接 → 归零；没人接 → 累计，够了进冷却。 */
+  #settleProactiveMisses(cfg, now) {
+    const all = followupStore.loadMeta();
+    for (const [chatKey, m] of Object.entries(all)) {
+      const pendingAt = Number(m?.pendingAt || 0);
+      if (!pendingAt || now - pendingAt < 30 * 60000) continue;
+      let replied = false;
+      try {
+        replied = this.store.recent(chatKey, { limit: 40 }).some((x) => !x.self && Number(x.ts) > pendingAt);
+      } catch { /* ignore */ }
+      const streak = replied ? 0 : (Number(m.missStreak) || 0) + 1;
+      const threshold = Math.max(1, Number(cfg.proactive?.missThreshold ?? 2));
+      const cooldownDays = Math.max(0, Number(cfg.proactive?.missCooldownDays ?? 3));
+      const cooldownUntil = (!replied && streak >= threshold)
+        ? now + cooldownDays * 86400000
+        : Number(m.cooldownUntil || 0);
+      followupStore.patchChatMeta(chatKey, { pendingAt: 0, missStreak: streak, cooldownUntil });
+      if (!replied && streak >= threshold) {
+        console.log(`[orchestrator] ${chatKey} 连续 ${streak} 次主动没人接，冷却 ${cooldownDays} 天`);
+      }
+    }
   }
 
   #proactiveCandidates(cfg) {

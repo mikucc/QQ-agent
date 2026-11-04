@@ -1,0 +1,161 @@
+{
+  "id": "daily-schedule",
+  "name": "每日日程",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "category": "knowledge",
+  "description": "给角色一份全局的虚构生活时间线：每天 23:30 生成明天 6~10 段日程，启动时补今天；每轮只注入日期、时间、此刻在做什么、接下来一段。角色可以用 schedule_view 查看、schedule_adjust 临时改计划。生成时参考人设、生活圣经、最近三天、心情和重要记忆；正文不会让模型念时间表。",
+  "author": "本地",
+  "entry": "index.js",
+  "enabledByDefault": true,
+  "capabilities": [
+    "schedule.current"
+  ],
+  "requires": [],
+  "permissions": [],
+  "settings": {
+    "enabled": true,
+    "generateHour": 23,
+    "generateMinute": 30,
+    "timezone": "Asia/Shanghai",
+    "segmentsMin": 6,
+    "segmentsMax": 15,
+    "injectAll": true,
+    "specialRequest": "",
+    "retryMinutes": 20,
+    "maxAdjustPerDay": 3,
+    "dayTypeWeights": "workday:3,rest:2,out:2,home:3,overtime:1,slack:2",
+    "lifeBible": "住：南方小城老小区顶楼\n工作：接零散稿子，不用坐班\n常去：楼下便利店、河边步道\n固定：嗜甜，晚上容易犯困",
+    "momentEnabled": true,
+    "momentTtlMin": 15,
+    "momentMinGapMin": 6,
+    "momentMaxPerDay": 12,
+    "momentMaxTokens": 800,
+    "wardrobeOutside": "水手JK,外出卫衣,外出红开衫",
+    "wardrobeHome": "居家服,居家运动,居家旧T",
+    "wardrobeSleep": "睡衣,睡衣丝质,睡衣小熊",
+    "wardrobeHairOutside": "松松散散的高马尾，额前留几缕碎发|自然披散，发尾微卷|侧边低马尾，耳侧夹一枚小发夹",
+    "wardrobeHairHome": "随手扎起的丸子头，碎发掉在耳侧|用夹子随手夹起，露出后颈|低低的双马尾，有点松",
+    "wardrobeHairSleep": "完全披散，压在枕头上有点乱|松松的低马尾，没扎紧|披散着，额头碎发被睡乱"
+  },
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用每日日程",
+      "description": "关掉后不再生成、注入；已有日程保留在 data/daily-schedule/。"
+    },
+    "generateHour": {
+      "type": "number",
+      "label": "生成明天的时（0-23）",
+      "description": "默认 23。"
+    },
+    "generateMinute": {
+      "type": "number",
+      "label": "生成明天的分（0-59）",
+      "description": "默认 30。"
+    },
+    "timezone": {
+      "type": "string",
+      "label": "时区",
+      "description": "默认 Asia/Shanghai。"
+    },
+    "segmentsMin": {
+      "type": "number",
+      "label": "最少几段",
+      "description": "默认 6。"
+    },
+    "segmentsMax": {
+      "type": "number",
+      "label": "最多几段",
+      "description": "默认 15；超过会合并相邻段，注入端只显示 5 行。"
+    },
+    "injectAll": {
+      "type": "boolean",
+      "label": "注入所有会话",
+      "description": "默认开；群聊和私聊都带。干正事的会话可以在提示词里要求“正事优先”。"
+    },
+    "specialRequest": {
+      "type": "string",
+      "label": "这一天的特别要求（可选）",
+      "description": "例如“下午去看电影”“今天不想出门”。会带进下次生成。",
+      "multiline": true
+    },
+    "retryMinutes": {
+      "type": "number",
+      "label": "生成失败后多久重试（分钟）",
+      "description": "默认 20。失败会先用模板兜底，再后台重试。"
+    },
+    "maxAdjustPerDay": {
+      "type": "number",
+      "label": "一天最多临时改几次",
+      "description": "默认 3。防止日程被频繁改乱。"
+    },
+    "dayTypeWeights": {
+      "type": "string",
+      "label": "日程类型权重",
+      "description": "格式 workday:3,rest:2,out:2,home:3,overtime:1,slack:2；不写就用默认。",
+      "multiline": true
+    },
+    "lifeBible": {
+      "type": "string",
+      "label": "生活圣经（固定事实）",
+      "description": "住哪、做什么、常去哪、固定习惯。属于虚构设定，不要写真实隐私。",
+      "multiline": true
+    },
+    "momentEnabled": {
+      "type": "boolean",
+      "label": "转场文案（刚……）",
+      "description": "每段切换时实时写一句现场细节，注入提示词；失败就不写。"
+    },
+    "momentTtlMin": {
+      "type": "number",
+      "label": "转场文案有效期（分钟）",
+      "description": "默认 15。过期后不再注入，避免“刚洗完澡”挂两小时。"
+    },
+    "momentMinGapMin": {
+      "type": "number",
+      "label": "两次转场文案最小间隔（分钟）",
+      "description": "默认 6，防止连续切段时刷屏。"
+    },
+    "momentMaxPerDay": {
+      "type": "number",
+      "label": "每天最多几条",
+      "description": "默认 12。"
+    },
+    "momentMaxTokens": {
+      "type": "number",
+      "label": "单次生成 token 上限",
+      "description": "默认 800。这个模型会先花 reasoning token，给太少会正文为空。"
+    },
+    "wardrobeOutside": {
+      "type": "string",
+      "label": "出门穿（候选）",
+      "description": "逗号分隔；每天从里面随机选一套（同一整天固定）。名字要和生图库 outfits 里的条目一致。"
+    },
+    "wardrobeHome": {
+      "type": "string",
+      "label": "在家穿（候选）",
+      "description": "逗号分隔；每天随机一套。"
+    },
+    "wardrobeSleep": {
+      "type": "string",
+      "label": "洗完澡/睡觉穿（候选）",
+      "description": "逗号分隔；每天随机一套。"
+    },
+    "wardrobeHairOutside": {
+      "type": "string",
+      "label": "出门发型（候选）",
+      "description": "用 | 分隔（描述里可以有逗号）；每天随机一条，直接进生图 prompt。"
+    },
+    "wardrobeHairHome": {
+      "type": "string",
+      "label": "在家发型（候选）",
+      "description": "用 | 分隔；每天随机一条。"
+    },
+    "wardrobeHairSleep": {
+      "type": "string",
+      "label": "睡前发型（候选）",
+      "description": "用 | 分隔；每天随机一条。"
+    }
+  }
+}

@@ -1,0 +1,103 @@
+{
+  "id": "attention-gate",
+  "name": "注意力门",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "category": "message",
+  "description": "群聊唤醒前的本地判断：被 @ / 回复 / 拍一拍 / 叫她的名字必醒；不判断“在叫哪个群友”，其余按兴趣、问句、情绪加权决定要不要跑模型。她自己的称呼由 agent 自己维护（固定身份 / 明确命名 / 被叫到时的候选），不维护群友名单。私聊不经过这里，永远唤醒。判断全程不调模型，沉默时不建会话、不烧 token。",
+  "author": "本地",
+  "entry": "index.js",
+  "enabledByDefault": true,
+  "capabilities": ["status.attention-gate"],
+  "requires": [],
+  "permissions": [],
+  "settings": {
+    "enabled": true,
+    "dryRun": false,
+    "interjectChance": 15,
+    "interestKeywords": "小鲸鱼,鲸鱼,DeepSeek,画画,游戏,吃,睡,累,可爱,喜欢,代码,bug",
+    "questionBonus": 20,
+    "emotionBonus": 15,
+    "interestBonus": 35,
+    "atAllBonus": 10,
+    "ownerBonus": 15,
+    "minGapSeconds": 15,
+    "continuationWindowSeconds": 120,
+    "maxWakePerHour": 60,
+    "aliases": "",
+    "logDecisions": true
+  },
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用注意力门",
+      "description": "关掉后退回原行为：群聊每条消息仍按内核档位唤醒。"
+    },
+    "dryRun": {
+      "type": "boolean",
+      "label": "演练模式",
+      "description": "开启时只记录“本来会沉默/唤醒”，不真正拦截。建议先跑一天看日志，再关掉。"
+    },
+    "interjectChance": {
+      "type": "number",
+      "label": "主动搭腔基础概率（%）",
+      "description": "默认 15。没人叫她时，按兴趣加权后的基准概率。"
+    },
+    "interestKeywords": {
+      "type": "string",
+      "label": "她感兴趣的话题词",
+      "description": "逗号或换行分隔。命中会显著提高唤醒概率。",
+      "multiline": true
+    },
+    "questionBonus": {
+      "type": "number",
+      "label": "是问句时的加成（%）",
+      "description": "默认 20。"
+    },
+    "emotionBonus": {
+      "type": "number",
+      "label": "带情绪时的加成（%）",
+      "description": "默认 15。"
+    },
+    "interestBonus": {
+      "type": "number",
+      "label": "命中兴趣词的加成（%）",
+      "description": "默认 35。"
+    },
+    "atAllBonus": {
+      "type": "number",
+      "label": "@全体时的加成（%）",
+      "description": "默认 10。@全体不强制唤醒，只算弱相关。"
+    },
+    "ownerBonus": {
+      "type": "number",
+      "label": "主人说话时的加成（%）",
+      "description": "默认 15。主人不强制唤醒，但更容易被注意到。"
+    },
+    "minGapSeconds": {
+      "type": "number",
+      "label": "两次主动唤醒的最短间隔（秒）",
+      "description": "默认 15。防止她在别人聊天时连续主动插话；@/回复/拍一拍/叫名字/对话延续不受限制。"
+    },
+    "continuationWindowSeconds": {
+      "type": "number",
+      "label": "对话延续窗口（秒）",
+      "description": "默认 120。她刚回过这个人，或对方紧接着说“你”，在这个窗口内视为继续对话，不套用最短间隔。"
+    },
+    "maxWakePerHour": {
+      "type": "number",
+      "label": "每小时最多主动唤醒几次",
+      "description": "默认 60。防止在很吵的群里频繁跑模型；被叫到不受限制。"
+    },
+    "aliases": {
+      "type": "string",
+      "label": "额外固定称呼",
+      "description": "逗号分隔。只写她自己的名字，不要写群友。agent 也会从“以后叫你 X / 叫你 X”和“被叫到时句首/句尾的称呼”里自己学，最多 3 个。"
+    },
+    "logDecisions": {
+      "type": "boolean",
+      "label": "记录每次判断",
+      "description": "默认开。日志里能看到唤醒/沉默、命中的词、概率和掷骰结果。"
+    }
+  }
+}

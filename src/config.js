@@ -228,7 +228,17 @@ export const DEFAULT_CONFIG = {
     checkIntervalMinMs: 1800000,
     checkIntervalMaxMs: 5400000,
     idleThresholdMs: 1800000,   // 群里静默多久才算"冷场"
-    probability: 0.25
+    probability: 0.25,
+    // ── 2026-11 主动逻辑重做 ──
+    // 旧逻辑是"每 30-90 分钟掷一次骰子、随机挑一个冷群"，实测 5 条主动有 4 条发生在
+    // 凌晨 4-7 点、4 条没人接。现在加四道闸：
+    activeStartHour: 9,          // 只在 09:00-23:00 主动
+    activeEndHour: 23,
+    quietMinutesAfterActivity: 5,// 群里 5 分钟内有人说话 → 不算冷场，不插嘴
+    dailyMaxPerChat: 1,          // 每个会话每天最多主动 1 次（当前按 20 小时近似）
+    missThreshold: 2,            // 连续被无视几次后进入冷却
+    missCooldownDays: 3,         // 冷却天数
+    followupEnabled: true        // 是否追踪"约定/待办"并到点主动问
   },
   // 活跃模式（chatActive）：1/2/3 档被召唤触发响应后，模型若认为话题值得持续参与，
   // 会在 finish 时带回话题总结 → 该群进入"活跃期"：忽略档位判定必响应，

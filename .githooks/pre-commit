@@ -1,0 +1,5 @@
+#!/bin/sh
+# 提交前敏感信息检查。启用方式（仓库内执行一次）：
+#   git config core.hooksPath .githooks
+# 跳过检查：git commit --no-verify
+exec node scripts/check-secrets.mjs

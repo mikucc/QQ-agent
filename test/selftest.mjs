@@ -288,9 +288,18 @@ refs:
     drainDelayMs: 200,
     maxConcurrentRuns: 2,
     send: { minGapMs: 10, maxGapMs: 20, byLengthMs: 0, maxPerMinute: 100, maxPerHour: 1000, hardSplitAt: 4000 },
-    proactive: { enabled: false },
+    proactive: { enabled: false, followupEnabled: false },
     sticker: { enabled: true, collectEnabled: true },
     store: { maxMessagesPerChat: 0, pastStateLimit: 80, pastStateMaxChars: 6000, keepSessionFiles: 100 },
+    // 这三个插件会在启动/收尾时自己调模型，把 mock LLM 的脚本响应吃掉，
+    // 导致"第 1 次请求"不再是被测的聊天请求（它们都是 2026-11 之后加的）。
+    // 自测只验证核心链路，这里显式关掉，保持与插件引入前一致的确定性。
+    skills: {
+      'daily-schedule': { enabled: false },
+      'plastic-memory': { enabled: false },
+      'early-finish': { enabled: false },
+      mood: { enabled: false }
+    },
     server: { port: await freePort(), token: '' }
   };
   fs.writeFileSync(path.join(dataDir, 'config.json'), JSON.stringify(cfg));
@@ -355,8 +364,7 @@ refs:
   pass('发送：分条 + 顺序 + CQ 转义正确');
 
   assert.ok(session1.status === 'done', `运行 1 状态应为 done，实际 ${session1.status}`);
-  assert.strictEqual(session1.usage.totalTokens, 250, 'usage 已累计两次调用（120+130）');
-  assert.strictEqual(session1.sent.length, 2, '会话记录了 2 条已发送');
+  assert.strictEqual(session1.usage.totalTokens, 250, 'usage 已累计两次调用（120+130）');  assert.strictEqual(session1.sent.length, 2, '会话记录了 2 条已发送');
   assert.ok(session1.systemPrompt && session1.userPrompt, '会话记录含完整提示词');
   pass('会话记录：状态/用量/已发送/提示词留档完整', `totalTokens=${session1.usage.totalTokens}`);
 
