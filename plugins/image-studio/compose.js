@@ -53,10 +53,13 @@ export function compose(args = {}, cfg = {}, lib = {}) {
   // 服饰兜底：显式 > 今天的衣柜（日程决定）> 按情境挑 > 人物默认 > 场景默认
   // 以前没指定就永远穿 defaultOutfit（水手JK），所以每张图看着都像同一张。
   if (!outfits.length && args.wardrobe) {
-    const hint = `${prompt} ${args.situation || ''} ${scene?.name || ''}`;
-    const cat = /睡|床|刚醒|洗完|睡衣/.test(hint)
+    // 和日程注入同一套规则：睡/刚醒/洗完 → 睡衣；日程地点不是家 → 出门；其余当在家。
+    // 不再用"命中出门词才算外面"的词表 —— 少一个词就错判成居家（2026-11-05 在食堂踩过）。
+    const act = `${args.scheduleActivity || ''} ${prompt}`;
+    const loc = String(args.scheduleLocation || '');
+    const cat = /睡|刚醒|洗完/.test(act)
       ? 'sleep'
-      : (/出门|便利店|河边|下楼|路上|散步|外面/.test(hint) ? 'outside' : 'home');
+      : (loc ? (!/家/.test(loc) ? 'outside' : 'home') : (scene ? 'outside' : 'home'));
     const name = String(args.wardrobe[cat] || '').trim();
     const hit = name && resolveRef('outfits', name, lib);
     if (hit) outfits.push(hit);

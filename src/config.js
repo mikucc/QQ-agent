@@ -238,7 +238,14 @@ export const DEFAULT_CONFIG = {
     dailyMaxPerChat: 1,          // 每个会话每天最多主动 1 次（当前按 20 小时近似）
     missThreshold: 2,            // 连续被无视几次后进入冷却
     missCooldownDays: 3,         // 冷却天数
-    followupEnabled: true        // 是否追踪"约定/待办"并到点主动问
+    followupEnabled: true,       // 是否追踪"约定/待办"并到点主动问
+    // 私聊（和主人）也能主动：在外面的时候放宽间隔，让她路上能发两条
+    privateEnabled: true,
+    privateAwayIdleMs: 900000,   // 在外面时，安静 15 分钟就可以发一条
+    privateAwayGapHours: 4,      // 在外面时，两次主动之间至少隔 4 小时
+    privateIdleMs: 2400000,      // 在家时，私聊安静 40 分钟就可以找一次
+    privateGapHours: 6,          // 在家时，两次私聊主动之间至少隔 6 小时（≈一天 2~3 次）
+    photoChance: 0.35            // 在外面的主动机会里，有多大比例要求"配一张图"
   },
   // 活跃模式（chatActive）：1/2/3 档被召唤触发响应后，模型若认为话题值得持续参与，
   // 会在 finish 时带回话题总结 → 该群进入"活跃期"：忽略档位判定必响应，

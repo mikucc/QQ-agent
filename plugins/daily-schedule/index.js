@@ -6,6 +6,7 @@ import path from 'node:path';
 import { getConfig } from '../../src/config.js';
 import { chatCompletion, resolveApiKey } from '../../src/llm.js';
 import { ensureDay, normalizeSegments } from './generate.js';
+import { planAdjustment } from './adjust.js';
 import { renderSchedule, currentSegment } from './prompt.js';
 import {
   addAdjustment,
@@ -420,25 +421,32 @@ function registerTools() {
       type: 'object',
       properties: {
         start: { type: 'string', description: '开始时间 HH:MM' },
-        end: { type: 'string', description: '结束时间 HH:MM' },
+        end: { type: 'string', description: '结束时间 HH:MM（只改一格时用）' },
+        until: { type: 'string', description: '改到几点为止 HH:MM。出门/回学校/去医院这种会持续一段时间的事，用它把后面一起改掉' },
         activity: { type: 'string', description: '做什么' },
+        segments: {
+          type: 'array',
+          description: '整段计划：一次给出后续几个时段，插件会按顺序铺开、自动补“待定”。适合“出门半天”这种要连改好几格的场景',
+          items: {
+            type: 'object',
+            properties: {
+              start: { type: 'string' }, end: { type: 'string' }, activity: { type: 'string' },
+              location: { type: 'string' }, with: { type: 'string' }, note: { type: 'string' }
+            },
+            required: ['start', 'end', 'activity']
+          }
+        },
+        tentative: { type: 'boolean', description: '时间/安排还不确定时设为 true，会自动在活动名后标“（待定）”' },
         location: { type: 'string', description: '在哪（可选）' },
         with: { type: 'string', description: '和谁（可选）' },
         note: { type: 'string', description: '备注（可选）' }
       },
-      required: ['start', 'end', 'activity']
+      required: ['start']
     },
     execute(ctx, args) {
       try {
-        const start = timeToMinutes(args?.start);
-        const end = timeToMinutes(args?.end);
-        const activity = String(args?.activity || '').trim().slice(0, 80);
-        if (start === null || end === null || end <= start || !activity) {
-          return { content: '时间或活动不合法，没改。' };
-        }
         const now = nowParts(Date.now(), tz());
         const nowMin = now.hour * 60 + now.minute;
-        if (end <= nowMin) return { content: '已经过去的时间改不了。' };
         const date = today();
         const day = loadDay(date);
         if (!day) return { content: '今天还没有日程，先等它生成。' };
@@ -446,28 +454,45 @@ function registerTools() {
         if ((day.adjustments || []).length >= maxAdjust) {
           return { content: `今天已经改过 ${maxAdjust} 次了，先这样吧。` };
         }
-        const next = [];
-        for (const s of day.segments) {
-          const ss = timeToMinutes(s.start);
-          const se = timeToMinutes(s.end);
-          if (se <= start || ss >= end) { next.push(s); continue; }
-          if (ss < start) next.push({ ...s, end: minutesToTime(start) });
-          if (se > end) next.push({ ...s, start: minutesToTime(end) });
-        }
-        next.push({
-          start: minutesToTime(start),
-          end: minutesToTime(end),
-          activity,
-          location: String(args?.location || '').trim().slice(0, 40) || '外面',
-          with: String(args?.with || '').trim().slice(0, 40),
-          note: String(args?.note || '').trim().slice(0, 120)
-        });
-        day.segments = normalizeSegments(next, cfg()?.segmentsMax || 10);
-        addAdjustment(day, { start, end, activity });
+        const res = planAdjustment(day, args, { nowMin, maxSegments: cfg()?.segmentsMax || 15 });
+        if (res.error) return { content: res.error };
+        day.segments = normalizeSegments(res.segments, cfg()?.segmentsMax || 15);
+        addAdjustment(day, res.adjustment);
         saveDay(day);
-        return { content: `改好了：${minutesToTime(start)}-${minutesToTime(end)} ${activity}。` };
+        return { content: `改好了：${res.adjustment.start}-${res.adjustment.end} ${res.adjustment.activity}。` };
       } catch (e) {
         return { content: `改日程失败：${e?.message || e}` };
+      }
+    }
+  });
+
+  api.registerTool({
+    id: 'schedule_replan',
+    name: '重写今天的安排',
+    description: '大改动时用：出门半天、回母校、去医院、被叫去别的地方——这种会持续很久、后面的安排全得跟着变的。会把当前日程和上下文交给模型，重写从 from 到 to 的时段，保证和已经发生的部分连贯；拿不准的时间会标“（待定）”。只插一件小事（拿快递、下楼买水）用 schedule_adjust。',
+    category: 'knowledge',
+    parameters: {
+      type: 'object',
+      properties: {
+        request: { type: 'string', description: '发生了什么、要改成什么。例如“主人带我去母校，10:43 的火车，大概到下午三点，他自己去办事，我自己逛”' },
+        from: { type: 'string', description: '从几点开始改 HH:MM，默认现在' },
+        to: { type: 'string', description: '改到几点 HH:MM，默认到今天就结束' }
+      },
+      required: ['request']
+    },
+    async execute(ctx, args) {
+      try {
+        const day = loadDay(today());
+        if (!day) return { content: '今天还没有日程。' };
+        const maxAdjust = Math.max(1, Number(cfg()?.maxAdjustPerDay) || 3);
+        if ((day.adjustments || []).length >= maxAdjust) {
+          return { content: `今天已经改过 ${maxAdjust} 次了，先这样吧。` };
+        }
+        const r = await replanDay({ request: String(args?.request || '').trim(), from: args?.from || null, to: args?.to || null });
+        if (r.error) return { content: r.error };
+        return { content: `重写好了：从 ${args?.from || '现在'} 到 ${args?.to || '今天结束'}，共 ${r.segments} 段。` };
+      } catch (e) {
+        return { content: `重写失败：${e?.message || e}` };
       }
     }
   });
@@ -493,6 +518,10 @@ export function setup(a) {
   cfg = a?.config || (() => ({}));
   if (timer) clearInterval(timer);
   if (boot) clearTimeout(boot);
+  // 注册工具：一直在写 registerTools，但 setup 从来没调用过它 ——
+  // 结果 schedule_view / schedule_adjust / schedule_current 三个工具根本不存在的，
+  // 模型说"工具列表里没有 schedule_adjust"是真的（2026-11-05 查出来的）。
+  registerTools();
   timer = setInterval(tick, 60000);
   timer.unref?.();
   boot = setTimeout(tick, 5000);
@@ -503,6 +532,112 @@ export function setup(a) {
 export const hooks = {
   'before-context': beforeContext
 };
+
+// ── 用模型重写日程（大改动）────────────────────────────────────────────
+// 只做"切一格"的确定性补丁处理不了"出门半天"：它在语义上不知道后面该干嘛。
+// 这里把当前日程 + 当天上下文 + 人设喂给模型，让它从某个时刻起重写，
+// 保证与已经发生的部分衔接；不确定的时间由模型自己标"（待定）"。
+
+/** 把模型给的新段拼回当天：保留 startMin 之前和 endMin 之后的旧段，中间整体替换。 */
+export function mergeReplanned(day, newSegments = [], startMin = 0, endMin = 1440, maxSegments = 15) {
+  const keep = [];
+  for (const s of day.segments || []) {
+    const ss = timeToMinutes(s.start);
+    const se = timeToMinutes(s.end);
+    if (se <= startMin) { keep.push(s); continue; }        // 改动之前：原样保留
+    if (ss >= endMin) { keep.push(s); continue; }          // 改动之后（晚上）：也要保留
+    if (ss < startMin) keep.push({ ...s, end: minutesToTime(startMin) });
+    if (se > endMin) keep.push({ ...s, start: minutesToTime(endMin) });
+  }
+  const add = newSegments
+    .map((s) => {
+      const start = timeToMinutes(s?.start);
+      const end = timeToMinutes(s?.end);
+      const activity = String(s?.activity || '').trim().slice(0, 80);
+      if (start === null || end === null || end <= start || !activity) return null;
+      return { start: Math.max(start, startMin), end: Math.min(end, endMin), activity, location: String(s?.location || '').trim().slice(0, 40), with: String(s?.with || '').trim().slice(0, 40), note: String(s?.note || '').trim().slice(0, 120) };
+    })
+    .filter((s) => s && s.end > s.start)
+    .map((s) => ({ ...s, start: minutesToTime(s.start), end: minutesToTime(s.end) }))
+    .sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start));
+  const merged = [...keep, ...add].sort((a, b) => timeToMinutes(a.start) - timeToMinutes(b.start));
+  return normalizeSegments(merged, Math.max(1, Number(maxSegments) || 15));
+}
+
+async function replanDay({ request = '', from = null, to = null, now = Date.now() } = {}) {
+  const date = new Date(now).toLocaleDateString('en-CA', { timeZone: tz() });
+  const day = loadDay(date);
+  if (!day) return { error: '今天还没有日程' };
+  const nowPartsNow = nowParts(now, tz());
+  const nowMin = nowPartsNow.hour * 60 + nowPartsNow.minute;
+  const startMin = Math.max(nowMin, timeToMinutes(from) ?? nowMin);
+  const endMin = Math.min(1440, timeToMinutes(to) ?? 1440);
+  if (endMin <= startMin) return { error: '时间范围不合法' };
+
+  const c = getConfig();
+  const api = momentApi();
+  if (!api.baseUrl || !api.model || !api.apiKey) return { error: '模型接口没配置' };
+  const persona = String(c.persona?.roleText || '').slice(0, 1200);
+  const bible = String(cfg()?.lifeBible || '').slice(0, 400);
+  // 只把"已经发生"的部分交给模型；之后是它要重写的，别把旧的返程/回家当事实照抄
+  const current = day.segments
+    .filter((s) => timeToMinutes(s.end) <= startMin)
+    .map((s) => `${s.start}-${s.end} ${s.activity}${s.location ? `（${s.location}）` : ''}${s.note ? `，${s.note}` : ''}`)
+    .join('\n') || '（今天还没发生什么）';
+
+  const system = [
+    '你是这个角色的生活编剧，负责把她的日程改成新的连贯安排。',
+    '只重写指定时段，保留之前已经发生的部分；新安排必须与"现在正在做什么"自然衔接，不能出现"刚出门又在家赖床"。',
+    '不确定的细节可以自行补充合理内容（比如同去的人去忙自己的事、她自己逛），时间或安排拿不准就在活动名后加"（待定）"。',
+    // 2026-11-05 教训：和主人一起出门时，她按日程自己"下车、办完、回家"，
+    // 主人其实还在办事 —— 该等指令的节点被模型替主人决定了。
+    '和主人一起出门时：只写他明确说过的节点（几点出门、几点的车、去哪）；他没说的（什么时候下车、他什么时候办完、什么时候回家）**不要替他决定**。',
+    '这类没确定的开放段落写成“（待定）跟着主人，等他安排”并一直覆盖到时段结束；回家只在他说“回去了/忙完了”之后才写。',
+    '“你自己去逛”这种空档可以写具体内容，但结束点要等他的消息，不要写死一个"逛完就回家"的时间。',
+    '如果对方没说结束时间：只写到他明确说过的最后一个节点（比如“上了火车”），之后用一段“（待定）跟着主人，等他安排”覆盖到时段结束；**绝对不要写返程、回家、晚上安排**。',
+    '输出 JSON，不要 markdown：{"segments":[{"start":"HH:MM","end":"HH:MM","activity":"...","location":"...","note":"..."}]}',
+    `必须从 ${minutesToTime(startMin)} 连续覆盖到 ${minutesToTime(endMin)}，时间不能重叠或留空。`
+  ].join('\n');
+
+  const userPrompt = [
+    `现在：${minutesToTime(nowMin)}`,
+    `发生了什么：${request}`,
+    `需要重写的时段：${minutesToTime(startMin)} - ${minutesToTime(endMin)}`,
+    `当前日程：\n${current}`,
+    persona ? `人设（只取前 1200 字）：\n${persona}` : '',
+    bible ? `固定设定：\n${bible}` : '',
+    `只输出 JSON，从 ${minutesToTime(startMin)} 开始、到 ${minutesToTime(endMin)} 结束。`
+  ].filter(Boolean).join('\n');
+
+  try {
+    const ask = async (maxTokens) => {
+      const r = await chatCompletion({
+        messages: [{ role: 'system', content: system }, { role: 'user', content: userPrompt }],
+        temperature: 0.7,
+        maxTokens,
+        overrides: { ...api, timeoutMs: 60000 }
+      });
+      return String(r?.message?.content || '').trim();
+    };
+    // 这个模型会先吃 reasoning token：2400 偶尔全被思考吃掉、正文为空，加倍重试一次
+    let raw = await ask(2400);
+    if (!raw) raw = await ask(4800);
+    const first = raw.indexOf('{');
+    const last = raw.lastIndexOf('}');
+    if (first < 0 || last <= first) return { error: '模型没给出可解析的日程' };
+    const data = JSON.parse(raw.slice(first, last + 1));
+    const segs = Array.isArray(data?.segments) ? data.segments : [];
+    if (!segs.length) return { error: '模型返回了空日程' };
+    const merged = mergeReplanned(day, segs, startMin, endMin, cfg()?.segmentsMax || 15);
+    if (merged.length < 6) return { error: '重写后段数太少，没保存' };
+    day.segments = merged;
+    addAdjustment(day, { start: minutesToTime(startMin), end: minutesToTime(endMin), activity: `重写：${String(request).slice(0, 40)}` });
+    saveDay(day);
+    return { ok: true, segments: merged.length };
+  } catch (e) {
+    return { error: `重写失败：${e?.message || e}` };
+  }
+}
 
 export function promptSections(context = {}) {
   try {
@@ -578,5 +713,7 @@ export const internals = {
   shiftDate,
   weekdayOf,
   generateMomentText,
-  tooSimilar
+  tooSimilar,
+  replanDay,
+  mergeReplanned
 };

@@ -11,7 +11,7 @@
 import { getConfig, storeConfigForChat, personaForChat } from './config.js';
 import { vendorOfConfig } from './model-prices.js';
 import { randInt } from './util.js';
-import { buildSystemPrompt, buildUserPrompt, resolveContextTier } from './prompt.js';
+import { buildSystemPrompt, buildUserPrompt, looksLikeCorrection, resolveContextTier } from './prompt.js';
 import { chatCompletion, chatCompletionWithRetry, addUsage, isRetryableError } from './llm.js';
 import { buildToolDefs, toOpenAiTools, executeTool } from './tools.js';
 import { modelImageVerdict } from './vision-scan.js';
@@ -825,6 +825,17 @@ export class Orchestrator {
     });
   }
 
+  /** 对方在纠正位置/时间 → 提示模型对一下日程（改不改仍由模型决定）。 */
+  #correctionHint(triggerEntries = []) {
+    try {
+      const text = (triggerEntries || []).map((e) => String(e?.text || '')).join('\n');
+      if (!looksLikeCorrection(text)) return '';
+      return '（对方在纠正你的位置/时间。先对一下日程：如果日程写的和你实际不符，立刻用 schedule_replan 改掉再回话；只在嘴上认错、日程不改，下一轮还会错。）';
+    } catch {
+      return '';
+    }
+  }
+
   /** 口头禅过载提醒：一天里"唔/嗯/诶"开头的发言占比过高时，提示换开头。 */
   #ticHint(chatKey) {
     try {
@@ -843,6 +854,28 @@ export class Orchestrator {
 
   /** 主动机会要注入的"为什么现在开口"。 */
   #proactiveInstruction(reason) {
+    if (reason?.type === 'private-idle') {
+      return [
+        '【主动机会·找他说两句】',
+        '你在自己这边安静了一会儿，可以主动发一条：分享一件刚发生的小事、问一句“在干嘛/忙完了吗”，或者关心一句他累不累。',
+        '不要查岗（别问“你在哪、跟谁”）、不要连环问、不要汇报行程；一条就够，他不接就放下。'
+      ].join('\n');
+    }
+    if (reason?.type === 'away' && reason.segment) {
+      const seg = reason.segment;
+      // 有一部分主动机会明确要求"配图"，否则模型只会发文字（历史 54 次生图里 0 次主动）
+      const photoChance = Math.max(0, Math.min(1, Number(getConfig().proactive?.photoChance ?? 0.35)));
+      const wantPhoto = Math.random() < photoChance;
+      return [
+        '【主动机会·你在外面】',
+        `你此刻：${seg.activity}${seg.location ? `（${seg.location}）` : ''}。`,
+        wantPhoto
+          ? '这一条**配一张图**：调用 image_generate 拍你眼前看到的（不要标 user_requested），然后再补一句话，像随手拍给对方看。'
+          : '可以随口发一条你刚看到的、听到的、想到的，像给熟人发消息：不要汇报行程、不要写总结、别报时间点。',
+        '能联想到对方之前说过的事就自然带一句；想不出来就只说眼前这一件。一条就够。',
+        wantPhoto ? '' : '如果眼前有值得拍的东西，也可以顺手发一张照片（image_generate，别标 user_requested）；没有就不发。'
+      ].filter(Boolean).join('\n');
+    }
     if (reason?.type === 'followup' && reason.item) {
       const it = reason.item;
       const who = it.whoName || '对方';
@@ -984,6 +1017,10 @@ export class Orchestrator {
     // 口头禅过载：今天以"唔/嗯/诶"开头的发言太多时，给这一条加个提醒
     const ticHint = this.#ticHint(chatKey);
     if (ticHint) userPrompt += `\n\n${ticHint}`;
+
+    // 对方在纠正位置/时间：提示模型先对日程（改不改由模型判断，不强制）
+    const correctionHint = this.#correctionHint(triggerEntries);
+    if (correctionHint) userPrompt += `\n\n${correctionHint}`;
 
     session.systemPrompt = systemPrompt;
     session.userPrompt = userPrompt;
@@ -1551,9 +1588,22 @@ export class Orchestrator {
 
     // ② 随机闲聊（保留，但加闸）
     if (Math.random() > (Number(cfg.proactive?.probability) || 0.25)) return;
-    const candidates = this.#proactiveCandidates(cfg).filter((k) => this.#proactiveAllowed(cfg, k, now));
-    if (!candidates.length) return;
-    const chatKey = candidates[Math.floor(Math.random() * candidates.length)];
+    const scored = [];
+    for (const k of this.#proactiveCandidates(cfg)) {
+      const away = k.startsWith('private:') ? this.#awaySeg(k) : null;
+      if (!this.#proactiveAllowed(cfg, k, now, { away: Boolean(away) })) continue;
+      scored.push({ chatKey: k, away });
+    }
+    if (!scored.length) return;
+    // 私聊（和主人）优先：她主动找人的机会主要在这里，别被群的随机抽签挤掉
+    const privateOnes = scored.filter((x) => x.chatKey.startsWith('private:'));
+    const awayOnes = scored.filter((x) => x.away);
+    const pick = (privateOnes.length && Math.random() < 0.75)
+      ? privateOnes[Math.floor(Math.random() * privateOnes.length)]
+      : (awayOnes.length && Math.random() < 0.7
+        ? awayOnes[Math.floor(Math.random() * awayOnes.length)]
+        : scored[Math.floor(Math.random() * scored.length)]);
+    const chatKey = pick.chatKey;
     // 心情门：低心情/低电量时抑制主动（最多 10%）。没有插件/报错 → 放行。
     try {
       const gate = this.#capFirst('proactive.gate', { chatKey });
@@ -1572,7 +1622,10 @@ export class Orchestrator {
       console.warn('[orchestrator] proactive.gate 失败（按允许处理）：', error?.message ?? error);
     }
     this.#markProactiveSent(chatKey, now);
-    this.wake(chatKey, { proactive: true, proactiveReason: { type: 'idle' } })
+    const reason = pick.away
+      ? { type: 'away', segment: pick.away }
+      : (chatKey.startsWith('private:') ? { type: 'private-idle' } : { type: 'idle' });
+    this.wake(chatKey, { proactive: true, proactiveReason: reason })
       .catch((error) => console.error('[orchestrator] proactive 出错:', error));
   }
 
@@ -1585,17 +1638,42 @@ export class Orchestrator {
   }
 
   /** 主动的准入闸：冷却 / 每日上限 / 刚刚有人说话 / 有未读。 */
-  #proactiveAllowed(cfg, chatKey, now, { ignoreIdle = false } = {}) {
+  #proactiveAllowed(cfg, chatKey, now, { ignoreIdle = false, away = false } = {}) {
     if (!chatKey || this.runningChats.has(chatKey)) return false;
     const meta = followupStore.getChatMeta(chatKey);
     if (meta.cooldownUntil && now < Number(meta.cooldownUntil)) return false;
-    const gapMs = Math.max(1, Number(cfg.proactive?.dailyMaxPerChat ?? 1)) * 20 * 3600000;
+    const isPrivate = chatKey.startsWith('private:');
+    // 在外面的私聊：4 小时间隔；在家的私聊：6 小时（一天 2~3 次）；群聊维持"每天一次"≈20 小时
+    const gapHours = isPrivate
+      ? (away
+        ? Math.max(1, Number(cfg.proactive?.privateAwayGapHours) || 4)
+        : Math.max(1, Number(cfg.proactive?.privateGapHours) || 6))
+      : Math.max(1, Number(cfg.proactive?.dailyMaxPerChat ?? 1)) * 20;
+    const gapMs = gapHours * 3600000;
     if (meta.lastAt && now - Number(meta.lastAt) < gapMs) return false;
     const chatMeta = this.store.getChatMeta(chatKey);
     if (Number(chatMeta.unread) > 0) return false;
     const quietMs = Math.max(0, Number(cfg.proactive?.quietMinutesAfterActivity ?? 5)) * 60000;
     if (!ignoreIdle && quietMs && now - Number(chatMeta.lastTs || 0) < quietMs) return false;
     return true;
+  }
+
+  /** 当前日程段（插件没装/没启用时返回 null）。 */
+  #scheduleNow(chatKey) {
+    try {
+      const fn = this.#capFirst('schedule.current', { chatKey });
+      return fn ? fn() : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** 此刻是否在外面/路上（用来放宽主动间隔）。 */
+  #awaySeg(chatKey) {
+    const cur = this.#scheduleNow(chatKey);
+    if (!cur) return null;
+    const text = `${cur.activity || ''} ${cur.location || ''}`;
+    return /外面|路上|火车|校园|车站|地铁|街上|河边|母校|学校|便利店|咖啡店/.test(text) ? cur : null;
   }
 
   /** 记下"这次主动发出去了"，30 分钟后结算有没有人接。 */
@@ -1632,6 +1710,20 @@ export class Orchestrator {
     const out = [];
     for (const chatKey of this.store.listChats()) {
       const [kind, id] = chatKey.split(':');
+      // 私聊：和主人也能主动（在外面时放宽间隔，让她路上能发两条）
+      if (kind === 'private') {
+        if (cfg.proactive?.privateEnabled === false) continue;
+        const meta = this.store.getChatMeta(chatKey);
+        if (Number(meta.unread) > 0) continue;
+        if (this.runningChats.has(chatKey)) continue;
+        const away = this.#awaySeg(chatKey);
+        const gap = away
+          ? Math.max(300000, Number(cfg.proactive?.privateAwayIdleMs) || 900000)
+          : Math.max(300000, Number(cfg.proactive?.privateIdleMs) || 2400000);
+        if (Date.now() - Number(meta.lastTs || 0) < gap) continue;
+        out.push(chatKey);
+        continue;
+      }
       if (kind !== 'group') continue;
       if (allowGroups.length > 0 ? !allowGroups.includes(id) : !cfg.allowAllWhenEmpty) continue;
       const meta = this.store.getChatMeta(chatKey);

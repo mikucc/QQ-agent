@@ -23,7 +23,7 @@
     "injectAll": true,
     "specialRequest": "",
     "retryMinutes": 20,
-    "maxAdjustPerDay": 3,
+    "maxAdjustPerDay": 6,
     "dayTypeWeights": "workday:3,rest:2,out:2,home:3,overtime:1,slack:2",
     "lifeBible": "住：南方小城老小区顶楼\n工作：接零散稿子，不用坐班\n常去：楼下便利店、河边步道\n固定：嗜甜，晚上容易犯困",
     "momentEnabled": true,

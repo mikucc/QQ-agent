@@ -28,15 +28,15 @@
     "maxRefs": 6,
     "refsPerCharacter": 1,
     "autoMatch": true,
-    "cooldownMin": 30,
+    "cooldownMin": 15,
     "maxPerHour": 6,
-    "maxPerDay": 20,
+    "maxPerDay": 35,
     "stylePrompt": "日系动画插画，干净线条，柔和配色，自然光，角色保持一致",
     "extraHeaderName": "",
     "extraHeaderValue": "",
     "requestCooldownMin": 2,
     "requestMaxPerHour": 12,
-    "requestMaxPerDay": 40
+    "requestMaxPerDay": 55
   },
   "configSchema": {
     "enabled": {

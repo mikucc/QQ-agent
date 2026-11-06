@@ -99,7 +99,8 @@ function guideText(lib) {
     '参考库目录：',
     catalogText(lib, 10) || '（还没有素材，只按文字画）',
     '用法：prompt 写“谁在哪做什么、构图和情绪”；characters/outfits/scene/props 填库里的名字或 id。名字不确定就先调用 image_library 查。人物长相和服装设计由参考图保证，不要把参考图的姿势和表情照抄进 prompt。',
-    '不要每次都同一套：在家穿睡衣/居家服，出门换外套或水手服；镜头和动作也换着来（自拍、半身、全身、侧后方）。用户没指定就自己挑一套搭今天的场景。'
+    '不要每次都同一套：在家穿睡衣/居家服，出门换外套或水手服；镜头和动作也换着来（自拍、半身、全身、侧后方）。用户没指定就自己挑一套搭今天的场景。',
+    '**答应了就当场发**：说过“给你看/拍给你/等下拍”就必须在这一轮调用 image_generate 把图发出去；只回一句“好呀 给你看”然后结束，图就没了（会被提前收尾）。'
   ].join('\n');
 }
 
@@ -166,9 +167,15 @@ function registerTools() {
         const lib = getLib();
         // 今天的衣柜由 daily-schedule 决定（出门/在家/睡前各一套，当天固定）。
         // 拿不到就算了，compose 会退回按情境挑衣服。
-        let wardrobe = null;
-        try { wardrobe = api?.capability?.('schedule.current', { chatKey: ctx?.chatKey })?.wardrobe || null; } catch { /* ignore */ }
-        const composed = compose({ ...args, wardrobe }, c, lib);
+        let sched = null;
+        try { sched = api?.capability?.('schedule.current', { chatKey: ctx?.chatKey }) || null; } catch { /* ignore */ }
+        const wardrobe = sched?.wardrobe || null;
+        const composed = compose({
+          ...args,
+          wardrobe,
+          scheduleActivity: sched?.activity || '',
+          scheduleLocation: sched?.location || ''
+        }, c, lib);
         log(`[生图] 生成：${String(args?.prompt || '').slice(0, 60)}｜参考图 ${composed.refs.length} 张`);
         const result = await generate({ prompt: composed.prompt, refs: composed.refs, cfg: c });
         const saved = saveOutput(result.buffer, result.ext);

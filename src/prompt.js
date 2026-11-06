@@ -166,6 +166,9 @@ function stickerRules() {
   return [
     buildStickerStrategyHint(lvl),
     '',
+    '【表情包的读法】别人发的表情包/表情，先当**一句情绪**读：可爱、傲娇、哼、无语、笑死、撒娇、委屈……你回的是那个情绪或动作，不是画面。不要描述画面里有什么、不要评价里面人物的长相、也不要问“这画的谁”；只有对方明确问“这是什么/哪部/画的谁”时才说画面内容。',
+    '例：收到抱手站着的 Q 版 → “哼 谁欠你钱了” / “抱手 学我啊”（不是“粉毛小不点抱着手站着”）；收到闭眼撇嘴 → “撇嘴 你倒是会” / “少来 我不吃这套”（不是“这画的谁 嘴撇成这样”）。',
+    '',
     '【拍一拍】send_poke 可以发 QQ 拍一拍。收到消息里的 [拍一拍] 事件时可以自然回应（"？干嘛""再拍试试""哈哈"），也可以回一个拍一拍。有时也可以主动戳一下正在聊的人/熟人，像真人手贱一下反而更拟真；但别频繁。'
   ].join('\n');
 }
@@ -736,6 +739,16 @@ function collectMemberIds(messages) {
  *        contextLimit, tierInfo, activeTopic, memory, store, session, proactive,
  *        promptAnchor: { prev, maxExtraRead } }（prev = 上一轮锚点状态，orchestrator 维护）
  */
+/**
+ * 对方是不是在纠正她的位置/时间（"还没到站""你怎么又下车了"）。
+ * 只做"要不要提示模型对一下日程"的判断，不直接改日程 —— 改不改由模型决定。
+ */
+export function looksLikeCorrection(text = '') {
+  const t = String(text || '');
+  if (!t) return false;
+  return /还没到|没到站|还没下车|还在车上|还在路上|我还没到|你怎么.*下车|怎么又下车|先别下|还没回去|还在办|我说的是.*到/.test(t);
+}
+
 export function buildUserPrompt(ctx) {
   const cfg = getConfig();
   // 会话级人设：角色设定段的文本用本会话独立人设（personaByChat[群号/QQ号]），
@@ -867,6 +880,8 @@ export function buildUserPrompt(ctx) {
   // 私聊 = 和主人：允许自然带一句他之前说过的事（A 方案：不设好感度，只让"记得"更明显）
   if (String(ctx.chatKey || '').startsWith('private:')) {
     parts.push('（对方是主人：可以自然提一句他之前说过的事，像真的记得，不像查档案；一次最多一句，别把记忆整段念出来。）');
+    parts.push('（如果此刻在外面/路上/新地方，可以多补一两条：看到的、听到的、临时想到的，别只回一句就停；能联想到他之前说过的事就带一句。一次最多三条，分条发，别写成行程汇报。）');
+    parts.push('（对主人可以偶尔主动找他：分享一件小事、问一句在干嘛、关心他累不累；一天两三次不算多。但别查岗、别连环问、别每条都关心。）');
   }
 
   // 已读信息（锚定模式 = 锚点条目；标准模式 = 全部条目）
