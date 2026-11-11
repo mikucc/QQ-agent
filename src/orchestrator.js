@@ -854,17 +854,32 @@ export class Orchestrator {
 
   /** 主动机会要注入的"为什么现在开口"。 */
   #proactiveInstruction(reason) {
+    if (reason?.type === 'diary') {
+      return [
+        '【日记时间】',
+        '现在是晚上，今天还没写日记。用 diary_write 写两句今天的事——不用长、不用完整、不用给别人看，想到什么写什么。',
+        '写完之后：想说句晚安可以发，不想说就安静结束；不要汇报“我写了日记”。'
+      ].join('\n');
+    }
     if (reason?.type === 'private-idle') {
+      const sharePhoto = Math.random() < Math.max(0, Math.min(1, Number(getConfig().proactive?.sharePhotoChance ?? 0.5)));
       return [
         '【主动机会·找他说两句】',
-        '你在自己这边安静了一会儿，可以主动发一条：分享一件刚发生的小事、问一句“在干嘛/忙完了吗”，或者关心一句他累不累。',
-        '不要查岗（别问“你在哪、跟谁”）、不要连环问、不要汇报行程；一条就够，他不接就放下。'
+        '你在自己这边安静了一会儿。这次**优先分享自己眼前的一件小事**；如果上一条主动是在问他，就更别连着问了，换成分享。',
+        '分享可以分 2~5 条发：一条眼前的场景、一条你的反应或吐槽，需要的话再补一句问他；别超过 5 条，也别每条都问。',
+        '别写成汇报：不写“完成了什么、进度如何”，不用比喻堆感受，一条只说一件事。',
+        '像汇报："写稿写到咖啡都凉了，一口下去苦得跟药似的"。',
+        '像分享："咖啡凉了" / "苦得我脸都皱成一团" / "早知道刚才就喝了"。',
+        sharePhoto
+          ? '这一条配一张图：拍你眼前的东西（image_generate，别标 user_requested），再补一两句。'
+          : '眼前有值得拍的也可以顺手拍一张（image_generate，别标 user_requested）；没有就不发。',
+        '他不接就放下，别追问。'
       ].join('\n');
     }
     if (reason?.type === 'away' && reason.segment) {
       const seg = reason.segment;
       // 有一部分主动机会明确要求"配图"，否则模型只会发文字（历史 54 次生图里 0 次主动）
-      const photoChance = Math.max(0, Math.min(1, Number(getConfig().proactive?.photoChance ?? 0.35)));
+      const photoChance = Math.max(0, Math.min(1, Number(getConfig().proactive?.photoChance ?? 0.5)));
       const wantPhoto = Math.random() < photoChance;
       return [
         '【主动机会·你在外面】',
@@ -1568,6 +1583,32 @@ export class Orchestrator {
     if (this.aborted || this.paused || cfg.proactive?.enabled !== true) return;
     if (this.runningChats.size >= Math.max(1, Number(cfg.maxConcurrentRuns) || 2)) return;
     const now = Date.now();
+
+    // ⓪ 日记：每天固定时间写一篇（默认 23:20）。
+    // 放在时段窗之前 —— 默认主动窗口是 9:00-23:00，23:20 之后就被拦掉了。
+    try {
+      const pendingFn = this.#capFirst('diary.pending', {});
+      const pending = pendingFn ? pendingFn() : null;
+      if (pending?.pending) {
+        const d = new Date(now);
+        const due = (Math.max(0, Math.min(23, Number(pending.hour ?? 23))) * 60)
+          + Math.max(0, Math.min(59, Number(pending.minute ?? 20)));
+        if (d.getHours() * 60 + d.getMinutes() >= due) {
+          const chatKey = this.#diaryChatKey();
+          const meta = chatKey ? followupStore.getChatMeta(chatKey) : {};
+          const today = d.toLocaleDateString('en-CA');
+          const doneToday = meta.diaryAt && new Date(Number(meta.diaryAt)).toLocaleDateString('en-CA') === today;
+          if (chatKey && !doneToday) {
+            followupStore.patchChatMeta(chatKey, { diaryAt: now });
+            console.log(`[orchestrator] 日记到点：${chatKey}`);
+            this.wake(chatKey, { proactive: true, proactiveReason: { type: 'diary' } })
+              .catch((error) => console.error('[orchestrator] diary 出错:', error));
+            return;
+          }
+        }
+      }
+    } catch { /* 日记失败不影响主动消息 */ }
+
     if (!this.#inActiveHours(cfg, now)) return;
     this.#settleProactiveMisses(cfg, now);
 
@@ -1627,6 +1668,18 @@ export class Orchestrator {
       : (chatKey.startsWith('private:') ? { type: 'private-idle' } : { type: 'idle' });
     this.wake(chatKey, { proactive: true, proactiveReason: reason })
       .catch((error) => console.error('[orchestrator] proactive 出错:', error));
+  }
+
+  /** 写日记用哪个会话：优先最近活跃的私聊（她自己的对话）。 */
+  #diaryChatKey() {
+    try {
+      const chats = this.store.listChats().filter((k) => String(k).startsWith('private:'));
+      if (!chats.length) return null;
+      chats.sort((a, b) => Number(this.store.getChatMeta(b)?.lastTs || 0) - Number(this.store.getChatMeta(a)?.lastTs || 0));
+      return chats[0];
+    } catch {
+      return null;
+    }
   }
 
   /** 只在配置的时段内主动（跨零点也支持）。 */

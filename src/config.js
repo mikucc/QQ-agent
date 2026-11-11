@@ -225,10 +225,10 @@ export const DEFAULT_CONFIG = {
   // 主动开话题（可选）
   proactive: {
     enabled: false,
-    checkIntervalMinMs: 1800000,
-    checkIntervalMaxMs: 5400000,
+    checkIntervalMinMs: 600000,
+    checkIntervalMaxMs: 3600000,
     idleThresholdMs: 1800000,   // 群里静默多久才算"冷场"
-    probability: 0.25,
+    probability: 0.6,
     // ── 2026-11 主动逻辑重做 ──
     // 旧逻辑是"每 30-90 分钟掷一次骰子、随机挑一个冷群"，实测 5 条主动有 4 条发生在
     // 凌晨 4-7 点、4 条没人接。现在加四道闸：
@@ -241,11 +241,12 @@ export const DEFAULT_CONFIG = {
     followupEnabled: true,       // 是否追踪"约定/待办"并到点主动问
     // 私聊（和主人）也能主动：在外面的时候放宽间隔，让她路上能发两条
     privateEnabled: true,
-    privateAwayIdleMs: 900000,   // 在外面时，安静 15 分钟就可以发一条
-    privateAwayGapHours: 4,      // 在外面时，两次主动之间至少隔 4 小时
-    privateIdleMs: 2400000,      // 在家时，私聊安静 40 分钟就可以找一次
-    privateGapHours: 6,          // 在家时，两次私聊主动之间至少隔 6 小时（≈一天 2~3 次）
-    photoChance: 0.35            // 在外面的主动机会里，有多大比例要求"配一张图"
+    privateAwayIdleMs: 600000,   // 在外面时，安静 15 分钟就可以发一条
+    privateAwayGapHours: 2,      // 在外面时，两次主动之间至少隔 4 小时
+    privateIdleMs: 1500000,      // 在家时，私聊安静 40 分钟就可以找一次
+    privateGapHours: 3,          // 在家时，两次私聊主动之间至少隔 6 小时（≈一天 2~3 次）
+    photoChance: 0.5,            // 在外面的主动机会里，有多大比例要求"配一张图"
+    sharePhotoChance: 0.5        // 私聊分享自己事情时配图的概率
   },
   // 活跃模式（chatActive）：1/2/3 档被召唤触发响应后，模型若认为话题值得持续参与，
   // 会在 finish 时带回话题总结 → 该群进入"活跃期"：忽略档位判定必响应，
@@ -351,6 +352,11 @@ export const DEFAULT_CONFIG = {
     // 自动整理触发：全群印象总数超过该值，或任一成员超过 maxImpressionsPerMember
     consolidateMinImpressions: 4,
     maxImpressionsPerMember: 5
+  },
+  // 情景事实层：他最近亲口说的现实情况（电脑坏了、在公交上、今天忙），短期有效，
+  // 优先级高于虚构日程；由塑料记忆的抽取顺手写入。
+  facts: {
+    ttlHours: 24
   },
   // 工具与技能（skill 化开关）
   //

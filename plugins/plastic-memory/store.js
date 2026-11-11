@@ -45,15 +45,34 @@ export function normalizeText(s) {
     .replace(/[\s\p{P}\p{S}]+/gu, '');
 }
 
-/** 两条记忆是否像同一件事：归一化相等，或短句被长句包含且足够长。 */
-export function isSameMemory(a, b) {
+/** 二元组重合率（除以较短的一条，长句包含短句时接近 1）。 */
+export function similarity(a, b) {
+  const na = normalizeText(a);
+  const nb = normalizeText(b);
+  if (!na || !nb) return 0;
+  const bigrams = (t) => {
+    const set = new Set();
+    for (let i = 0; i + 1 < t.length; i += 1) set.add(t.slice(i, i + 2));
+    return set;
+  };
+  const A = bigrams(na);
+  const B = bigrams(nb);
+  if (!A.size || !B.size) return 0;
+  let hit = 0;
+  for (const x of A) if (B.has(x)) hit += 1;
+  return hit / Math.min(A.size, B.size);
+}
+
+/** 两条记忆是否像同一件事：归一化相等、短句被长句包含，或字面重合度够高。 */
+export function isSameMemory(a, b, threshold = 0.55) {
   const na = normalizeText(a);
   const nb = normalizeText(b);
   if (!na || !nb) return false;
   if (na === nb) return true;
   const short = na.length <= nb.length ? na : nb;
   const long = na.length <= nb.length ? nb : na;
-  return short.length >= 8 && long.includes(short);
+  if (short.length >= 8 && long.includes(short)) return true;
+  return similarity(a, b) >= threshold;
 }
 
 export function makeMemory(input = {}, now = Date.now()) {

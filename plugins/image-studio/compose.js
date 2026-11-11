@@ -1,7 +1,18 @@
 // 生图工作室 · 画面组合
+import crypto from 'node:crypto';
+import fs from 'node:fs';
 import { mentionedIn, resolveRef } from './library.js';
 
 const LABEL = { characters: '人物', outfits: '服饰', scenes: '场景', props: '道具' };
+
+/** 文件内容指纹：同一张图被当成"人物 + 服饰"两条参考时，只能发一次。 */
+function fileHash(file) {
+  try {
+    return crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  } catch {
+    return `path:${file}`;
+  }
+}
 
 function asList(v) {
   if (Array.isArray(v)) return v.map((x) => String(x).trim()).filter(Boolean);
@@ -88,10 +99,19 @@ export function compose(args = {}, cfg = {}, lib = {}) {
   const ordered = [...characters, ...outfits, ...(scene ? [scene] : []), ...props];
   const maxRefs = Math.max(1, Number(cfg.maxRefs) || 6);
   const refs = [];
+  const seenHashes = new Set();
   for (const entry of ordered) {
     const limit = entry.category === 'characters' ? Math.min(2, Number(cfg.refsPerCharacter) || 1) : 1;
     for (const img of (entry.images || []).slice(0, limit)) {
       if (refs.length >= maxRefs) break;
+      // 2026-11-11：水手JK 的参考图和人物图是同一个文件，两条都发会被上游判
+      // "Bad Request"（那天 23 次全失败，报错只写 upstream rejected）。
+      const hash = fileHash(img.abs);
+      if (seenHashes.has(hash)) {
+        notes.push(`${LABEL[entry.category]}「${entry.name}」的参考图与前面的重复，已跳过`);
+        continue;
+      }
+      seenHashes.add(hash);
       refs.push({
         path: img.abs,
         label: `${LABEL[entry.category]}「${entry.name}」`

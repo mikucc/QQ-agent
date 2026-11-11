@@ -8,7 +8,9 @@
   "author": "本地",
   "entry": "index.js",
   "enabledByDefault": true,
-  "capabilities": ["memory.important"],
+  "capabilities": [
+    "memory.important"
+  ],
   "requires": [],
   "permissions": [],
   "settings": {
@@ -28,8 +30,8 @@
     "preciousMaxPerChat": 5,
     "preciousMaxPerWeek": 3,
     "reviewIntervalMinutes": 15,
-    "injectTopK": 4,
-    "injectMaxChars": 1800,
+    "injectTopK": 8,
+    "injectMaxChars": 3000,
     "injectCooldownMinutes": 120,
     "selfDemotePrecious": true,
     "crossGroup": "person",
@@ -51,7 +53,11 @@
     },
     "injectMode": {
       "type": "enum",
-      "values": ["auto", "tool", "both"],
+      "values": [
+        "auto",
+        "tool",
+        "both"
+      ],
       "label": "记忆读取方式",
       "description": "auto=每轮自动注入少量；tool=不自动注入，模型自己用 memory_search；both=自动注入 + 可主动搜（推荐）。"
     },
@@ -142,7 +148,11 @@
     },
     "crossGroup": {
       "type": "enum",
-      "values": ["off", "person", "all"],
+      "values": [
+        "off",
+        "person",
+        "all"
+      ],
       "label": "跨群共享范围",
       "description": "off=只在本会话；person=只共享人物/agent 的稳定事实，不共享群内事件；all=全部（风险最高）。"
     },

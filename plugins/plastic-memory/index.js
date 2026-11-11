@@ -15,6 +15,7 @@ import { appendJournal } from './journal.js';
 import fs from 'node:fs';
 import path from 'node:path';
 import { DATA_DIR } from '../../src/config.js';
+import * as factsStore from '../../src/facts.js';
 
 /** 读同一会话最近的聊天记录当"前情"，让抽取窗口不止一轮。 */
 function recentHistory(chatKey, limit = 14) {
@@ -69,7 +70,9 @@ function scheduleCapture(context) {
     const chatKey = context?.chatKey;
     const session = context?.session;
     if (!chatKey || !session) return;
-    if (!Array.isArray(session.sent) || session.sent.length === 0) return;
+    // ⚠️ 这里**不能**判断 session.sent：after-response 钩子在本轮工具执行**之前**触发，
+    // 此刻 send_message 还没跑，sent 必然是空的（2026-11-11 重启后发现记忆不再抽取，
+    // 根因就是这一行把大多数单轮会话直接挡掉了）。sent 的判断挪到下面的定时器里。
     if (session.id && capturedSessions.has(session.id)) return;
 
     // 私聊（和主人）每轮都抽一次，让"记得你"更连续；群聊仍按 captureEveryRounds 节流
@@ -85,6 +88,8 @@ function scheduleCapture(context) {
     const timer = setTimeout(() => {
       captureTimers.delete(chatKey);
       captureTicks.set(chatKey, 0);
+      // 4 秒后工具已经跑完，sent 这时才是真实的
+      if (!Array.isArray(session.sent) || session.sent.length === 0) return;
       if (session.id) capturedSessions.add(session.id);
       void captureNow(context);
     }, delay);
@@ -100,16 +105,41 @@ async function captureNow(context) {
   capturing.add(chatKey);
   try {
     const session = context.session || {};
-    const candidates = await extractMemories({
+    // 让抽取器先看一遍"已有记忆"，重复的直接返回 duplicateOf，不再新增（2026-11-11 修：
+    // 之前同一件"明天睁眼拍照"以不同措辞记了 9 条，靠字符串包含判断完全挡不住）。
+    const existingMemories = store.load(chatKey).memories
+      .filter((m) => m.status === 'active')
+      .sort((a, b) => Number(b.updatedAt || b.createdAt || 0) - Number(a.updatedAt || a.createdAt || 0))
+      .slice(0, 10)
+      .map((m) => ({ id: m.id, content: m.content }));
+    const result = await extractMemories({
       session,
       cfg: cfg(),
       chatKey,
       log,
-      historyText: recentHistory(chatKey)
+      historyText: recentHistory(chatKey),
+      existingMemories
     });
-    if (!candidates.length) return;
+    const candidates = result?.memories || [];
+    // 情景事实（短期）：他现在的现实情况，24 小时有效
+    for (const text of (result?.facts || [])) factsStore.add(chatKey, text);
+    if (!candidates.length) {
+      store.prune(chatKey, cfg());
+      return;
+    }
 
     for (const c of candidates) {
+      // 模型判定的重复：刷新确认时间 + 加一点强度，不再新增
+      if (c.duplicateOf) {
+        const hit = store.get(chatKey, c.duplicateOf);
+        if (hit) {
+          store.update(chatKey, hit.id, {
+            lastConfirmedAt: Date.now(),
+            strength: Math.min(1, Number(hit.strength || 0) + 0.08)
+          });
+          continue;
+        }
+      }
       const isCandidate = c.status === 'candidate';
       const tier = isCandidate ? 'important' : (c.tier === 'important' ? 'important' : 'ordinary');
       const { memory, duplicate } = store.add(chatKey, {

@@ -6,7 +6,9 @@
 //   3. 珍贵记忆定期自审，决定是否降为重要。
 //
 // 所有调用都失败静默：记忆是锦上添花，不能影响聊天主流程。
-import { getConfig } from '../../src/config.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { DATA_DIR, getConfig } from '../../src/config.js';
 import { chatCompletion, resolveApiKey } from '../../src/llm.js';
 
 function clamp01(n) {
@@ -15,8 +17,31 @@ function clamp01(n) {
   return Math.max(0, Math.min(1, x));
 }
 
-function parseJson(text) {
-  let s = String(text ?? '').trim();
+/**
+ * 主语规范：记忆正文里统一用「我 / 对方」。
+ * 模型多数时候会照做，这里是兜底：开头是 QQ 号 → 对方；开头是她自己的名字 → 我。
+ */
+export function normalizeSubject(content) {
+  let s = String(content || '').trim();
+  if (!s) return s;
+  const selfNames = [];
+  try {
+    const raw = JSON.parse(fs.readFileSync(path.join(DATA_DIR, 'attention-gate', 'self-names.json'), 'utf8'));
+    if (raw?.canonical) selfNames.push(String(raw.canonical));
+    for (const a of raw?.aliases || []) if (a?.name) selfNames.push(String(a.name));
+  } catch { /* 读不到就算了 */ }
+  selfNames.push(String(getConfig().persona?.botName || ''), '卡提');
+  for (const name of selfNames.filter(Boolean).sort((a, b) => b.length - a.length)) {
+    if (s.startsWith(name)) {
+      s = `我${s.slice(name.length).replace(/^[，,。:：\s]+/, '')}`;
+      break;
+    }
+  }
+  s = s.replace(/^\d{4,15}[，,。:：\s]*/, '对方');
+  return s.trim();
+}
+
+function parseJson(text) {  let s = String(text ?? '').trim();
   s = s.replace(/```(?:json)?/gi, '').replace(/```/g, '').trim();
   const first = s.indexOf('{');
   const last = s.lastIndexOf('}');
@@ -91,6 +116,8 @@ function subjectIds(session = {}) {
 
 function extractionPrompt(cfg = {}) {
   const values = String(cfg.valuesText || '').trim();
+  const existing = Array.isArray(cfg.existing) ? cfg.existing : [];
+  const existingText = existing.slice(0, 10).map((m) => `- ${m.id}：${m.content}`).join('\n') || '（还没有）';
   return [
     '你是这个角色的记忆整理器。你的任务不是聊天，是从刚结束的一轮对话里找出 0~2 条值得长期留下的记忆。',
     '',
@@ -113,28 +140,44 @@ function extractionPrompt(cfg = {}) {
     '',
     values ? `这个角色珍视：\n${values}` : '',
     '',
+    '写法要求：',
+    '- 主语规范：正文里用「我」指自己、「对方」指对话对象；不要把昵称、QQ 号写进正文（QQ 号放 subjects）。',
+    '- 一条只讲一件事；不要合并两件不相关的事。',
+    '- 如果这条和「已有记忆」讲的是同一件事，不要新增：输出 "duplicateOf":"<那条的 id>"，不要给 content。',
+    '',
+    `现在这个会话已有的记忆（判断重复用）：\n${existingText}`,
+    '',
+    '另外顺手抽 0~2 条「他现在的短期情况」（facts），只记他亲口说的、24 小时内有效的现实：',
+    '如「电脑坏了」「在公交车上」「这两天很忙」「生病了」「出差」。不要记情绪、不要记长期偏好。没有就 []。',
+    '',
     '只输出 JSON，不要 markdown：',
-    '{"memories":[{"content":"一条完整、可独立阅读的记忆","tier":"ordinary|important","preciousCandidate":false,"emotion":0.0,"uniqueness":0.0,"selfImpact":0.0,"reason":"为什么值得记/为什么珍贵","scope":"chat|person|global","subjects":["QQ号"],"visibility":"group|private|global"}]}'
+    '{"memories":[{"content":"一条完整、可独立阅读的记忆","tier":"ordinary|important","preciousCandidate":false,"emotion":0.0,"uniqueness":0.0,"selfImpact":0.0,"reason":"为什么值得记/为什么珍贵","scope":"chat|person|global","subjects":["QQ号"],"visibility":"group|private|global","duplicateOf":""}],"facts":[{"text":"他现在的短期情况"}]}'
   ].filter(Boolean).join('\n');
 }
 
-export async function extractMemories({ session, cfg = {}, chatKey = '', log = () => {}, historyText = '' } = {}) {
+export async function extractMemories({ session, cfg = {}, chatKey = '', log = () => {}, historyText = '', existingMemories = [] } = {}) {
   // 一轮对话往往只有两三句，"值得记的事"经常横跨好几轮才成形（例如"划界限"是在
   // 前情铺垫之后才发生的）。所以除了本轮，再把同一会话最近十几条消息作为"前情"带上，
   // 否则抽取窗口太窄 —— 实测单轮窗口 8 次抽样 0 命中，拼上 4 轮前情立刻抽出 1 条。
   const history = String(historyText || '').trim().slice(-1400);
   const dialogue = [history ? `（前情）\n${history}` : '', formatDialogue(session)].filter(Boolean).join('\n');
-  if (!dialogue) return [];
+  if (!dialogue) return { memories: [], facts: [] };
   const isPrivate = String(chatKey || session?.chatKey || '').startsWith('private:');
   const text = await callJson({
-    system: extractionPrompt(cfg),
-    user: `对话：\n${dialogue}\n\n请输出 JSON。没有值得记的就输出 {"memories":[]}。`,
+    system: extractionPrompt({ ...cfg, existing: existingMemories }),
+    user: `对话：\n${dialogue}\n\n请输出 JSON。没有值得记的就输出 {"memories":[],"facts":[]}。`,
     maxTokens: Math.max(600, Number(cfg.judgeMaxTokens) || 900)
   });
-  if (!text || !Array.isArray(text.memories)) return [];
+  if (!text) return { memories: [], facts: [] };
 
   const out = [];
-  for (const raw of text.memories.slice(0, Math.max(1, Number(cfg.captureMaxPerRun) || 2))) {
+  const memories = Array.isArray(text.memories) ? text.memories : [];
+  for (const raw of memories.slice(0, Math.max(1, Number(cfg.captureMaxPerRun) || 2))) {
+    const duplicateOf = String(raw?.duplicateOf || '').trim();
+    if (duplicateOf && !String(raw?.content || '').trim()) {
+      out.push({ duplicateOf });
+      continue;
+    }
     const content = String(raw?.content || '').trim();
     if (!content) continue;
     const precious = raw?.preciousCandidate === true
@@ -149,7 +192,7 @@ export async function extractMemories({ session, cfg = {}, chatKey = '', log = (
       ? raw.scope
       : (subjects.length ? 'person' : 'chat');
     out.push({
-      content: content.slice(0, 600),
+      content: normalizeSubject(content).slice(0, 600),
       tier,
       status: precious ? 'candidate' : 'active',
       preciousCandidate: precious,
@@ -162,11 +205,15 @@ export async function extractMemories({ session, cfg = {}, chatKey = '', log = (
       subjects,
       scope,
       visibility: isPrivate ? 'private' : (scope === 'global' ? 'global' : 'group'),
-      sourceMids: sourceMids(session)
+      sourceMids: sourceMids(session),
+      duplicateOf
     });
   }
-  log(`[plastic-memory] 抽取 ${out.length} 条`);
-  return out;
+  const facts = Array.isArray(text.facts)
+    ? text.facts.map((f) => String(f?.text || '').trim()).filter(Boolean).slice(0, 2)
+    : [];
+  log(`[plastic-memory] 抽取 ${out.filter((x) => x.content).length} 条记忆、${facts.length} 条事实`);
+  return { memories: out, facts };
 }
 
 async function advocate({ memory, cfg, existing = [] }) {

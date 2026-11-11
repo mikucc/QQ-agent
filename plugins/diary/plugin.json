@@ -1,0 +1,50 @@
+{
+  "id": "diary",
+  "name": "日记",
+  "version": "0.1.0",
+  "apiVersion": 1,
+  "category": "psychology",
+  "description": "每天可以写一篇日记：不限字数，随便写，只给自己看。到点还没写会提醒一句；写进 data/diary/<日期>.md。",
+  "author": "mikucc",
+  "entry": "index.js",
+  "enabledByDefault": true,
+  "capabilities": [
+    "diary.pending"
+  ],
+  "requires": [],
+  "permissions": [],
+  "settings": {
+    "enabled": true,
+    "writeHour": 23,
+    "injectChars": 400,
+    "remind": true,
+    "writeMinute": 20
+  },
+  "configSchema": {
+    "enabled": {
+      "type": "boolean",
+      "label": "启用日记",
+      "description": "关掉后不再提醒、也不注入最近的日记。"
+    },
+    "writeHour": {
+      "type": "number",
+      "label": "几点之后提醒写日记",
+      "description": "默认 22。过了这个点还没写，会在聊天时提一句。"
+    },
+    "injectChars": {
+      "type": "number",
+      "label": "注入多少字",
+      "description": "把最近一篇日记的前 N 个字带进提示词，默认 400。"
+    },
+    "remind": {
+      "type": "boolean",
+      "label": "到点提醒",
+      "description": "默认开。只提醒一次，写完当天不再提。"
+    },
+    "writeMinute": {
+      "type": "number",
+      "label": "几分（配合上面）",
+      "description": "默认 20，即 23:20。"
+    }
+  }
+}

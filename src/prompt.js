@@ -17,6 +17,7 @@ import { sliderToTier as _sliderToTier, tierToSlider as _tierToSlider, TIER_SLID
 export { _sliderToTier as sliderToTier, _tierToSlider as tierToSlider, _TIER_SLIDER_BANDS as TIER_SLIDER_BANDS };
 import { formatFullTime, formatShortTime } from './util.js';
 import { buildStickerContext, buildStickerStrategyHint } from './stickers.js';
+import { renderForPrompt as renderFacts } from './facts.js';
 import { skillManager } from './skills/manager.js';
 
 // ── 系统提示 ─────────────────────────────────────────────────────────────
@@ -54,6 +55,23 @@ function antiAiFlavor() {
     '- 少用推销/总结形容词："一绝""真管用""保证解压""绝对""超好用""非常推荐"这类词少用；真人更多说"还行""不知道""你自己搜""懒得找""别问我"。',
     '- 不要连发 2~3 条像客服补货；能一条说完就一条，想补再隔一会儿补。',
     '- 被群友指出"你 AI 味好重"时，可以大方玩梗承认，但不要立刻改口变成更正经的客服。'
+  ].join('\n');
+}
+
+/**
+ * 被夸时的反应（人设无关的通用规则）。
+ *
+ * 起因（2026-11-10）：用户说"你真可爱"，她回"大半夜的突然夸人 / 再夸两句我就真得睡了"——
+ * 用调侃把话挡回去，不像害羞。查下来人设里只写了"被逗害羞"，没有"被夸"的规则。
+ * 这条放在系统提示里而不是人设里：人设在界面上随时会改，规则放代码里不会被覆盖。
+ */
+export function shynessRules() {
+  return [
+    '【被夸时的反应】',
+    '- 被夸（可爱、好看、喜欢你、太厉害了）时，第一反应是**慌一下**，不是调侃把话挡回去（"大半夜的突然夸人"这类回避不要用）。',
+    '- 允许一次卡壳："……突然说这个""别、别夸了""我耳朵都热了"；或者小声顶一句再收（"你这么说我容易当真"）。',
+    '- 不解释、不追问"你为什么这么说"，也别把夸奖当任务（"你是不是想让我帮忙"）；两句内收住。',
+    '- 被追着夸时才轻怼一句（"知道了知道了"），不黏着要更多。'
   ].join('\n');
 }
 
@@ -286,6 +304,8 @@ export function buildSystemPrompt({ persona, skillContext, extraSections = [] } 
     antiAiFlavor(),
     '',
     jokeHandling(),
+    '',
+    shynessRules(),
     '',
     subjectivity(),
     '',
@@ -877,6 +897,9 @@ export function buildUserPrompt(ctx) {
 
   // 记忆段（锚定模式的字节前缀从这段开始跨轮不变）
   if (memText) parts.push(`【记忆】\n${memText}`);
+  // 情景事实层：他最近亲口说的现实情况（24 小时内有效），优先级高于虚构日程
+  const factsText = renderFacts(String(ctx.chatKey || ''));
+  if (factsText) parts.push(factsText);
   // 私聊 = 和主人：允许自然带一句他之前说过的事（A 方案：不设好感度，只让"记得"更明显）
   if (String(ctx.chatKey || '').startsWith('private:')) {
     parts.push('（对方是主人：可以自然提一句他之前说过的事，像真的记得，不像查档案；一次最多一句，别把记忆整段念出来。）');
