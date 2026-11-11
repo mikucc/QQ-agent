@@ -100,6 +100,8 @@ export function makeMemory(input = {}, now = Date.now()) {
     useCount: Number(input.useCount) || 0,
     strength: clamp(input.strength ?? 0.5, 0, 1),
     emotion: clamp(input.emotion ?? 0, 0, 1),
+    // 情绪标签：人记得的是"那件事发生时什么感觉"，光有 0~1 的数值模型读不出来。
+    emotionLabel: String(input.emotionLabel ?? '').slice(0, 6),
     uniqueness: clamp(input.uniqueness ?? 0, 0, 1),
     selfImpact: clamp(input.selfImpact ?? 0, 0, 1),
     confidence: clamp(input.confidence ?? 0.5, 0, 1),

@@ -117,7 +117,12 @@ export function renderMemoryLines(picked = []) {
     const text = String(memory.summary || memory.content || '').trim();
     if (!text) continue;
     const prefix = memory.tier === 'precious' ? '（这件事对你很重要）' : '';
-    lines.push(`- ${prefix}${text}`);
+    // 情绪标签：让"那件事当时什么感觉"也进提示词，而不是只留一个 0~1 的数值
+    const label = String(memory.emotionLabel || '').trim();
+    const level = Number(memory.emotion || 0);
+    const degree = level >= 0.66 ? '很' : (level >= 0.33 ? '有点' : '');
+    const emo = label && label !== '平静' ? `（${degree}${label}）` : '';
+    lines.push(`- ${prefix}${emo}${text}`);
   }
   return lines;
 }

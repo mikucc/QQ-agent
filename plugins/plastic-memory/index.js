@@ -153,6 +153,7 @@ async function captureNow(context) {
         evidence: c.evidence,
         preciousReason: c.preciousReason,
         emotion: c.emotion,
+        emotionLabel: c.emotionLabel,
         uniqueness: c.uniqueness,
         selfImpact: c.selfImpact,
         confidence: c.confidence,

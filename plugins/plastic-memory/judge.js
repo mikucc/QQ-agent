@@ -11,6 +11,9 @@ import path from 'node:path';
 import { DATA_DIR, getConfig } from '../../src/config.js';
 import { chatCompletion, resolveApiKey } from '../../src/llm.js';
 
+/** 情绪标签词表：只允许这几个，避免模型自由发挥。 */
+export const EMOTION_LABELS = ['平静', '开心', '气恼', '委屈', '难过', '害羞', '紧张', '得意', '心疼', '无奈'];
+
 function clamp01(n) {
   const x = Number(n);
   if (!Number.isFinite(x)) return 0;
@@ -144,6 +147,8 @@ function extractionPrompt(cfg = {}) {
     '- 主语规范：正文里用「我」指自己、「对方」指对话对象；不要把昵称、QQ 号写进正文（QQ 号放 subjects）。',
     '- 一条只讲一件事；不要合并两件不相关的事。',
     '- 如果这条和「已有记忆」讲的是同一件事，不要新增：输出 "duplicateOf":"<那条的 id>"，不要给 content。',
+    '- 情绪标签 emotionLabel 只能从这些词里选一个：平静 / 开心 / 气恼 / 委屈 / 难过 / 害羞 / 紧张 / 得意 / 心疼 / 无奈。',
+    '  （这件事发生时"我"的感受；确实没有明显情绪就用「平静」。）',
     '',
     `现在这个会话已有的记忆（判断重复用）：\n${existingText}`,
     '',
@@ -151,7 +156,7 @@ function extractionPrompt(cfg = {}) {
     '如「电脑坏了」「在公交车上」「这两天很忙」「生病了」「出差」。不要记情绪、不要记长期偏好。没有就 []。',
     '',
     '只输出 JSON，不要 markdown：',
-    '{"memories":[{"content":"一条完整、可独立阅读的记忆","tier":"ordinary|important","preciousCandidate":false,"emotion":0.0,"uniqueness":0.0,"selfImpact":0.0,"reason":"为什么值得记/为什么珍贵","scope":"chat|person|global","subjects":["QQ号"],"visibility":"group|private|global","duplicateOf":""}],"facts":[{"text":"他现在的短期情况"}]}'
+    '{"memories":[{"content":"一条完整、可独立阅读的记忆","tier":"ordinary|important","preciousCandidate":false,"emotion":0.0,"emotionLabel":"平静|开心|气恼|委屈|难过|害羞|紧张|得意|心疼|无奈","uniqueness":0.0,"selfImpact":0.0,"reason":"为什么值得记/为什么珍贵","scope":"chat|person|global","subjects":["QQ号"],"visibility":"group|private|global","duplicateOf":""}],"facts":[{"text":"他现在的短期情况"}]}'
   ].filter(Boolean).join('\n');
 }
 
@@ -197,6 +202,9 @@ export async function extractMemories({ session, cfg = {}, chatKey = '', log = (
       status: precious ? 'candidate' : 'active',
       preciousCandidate: precious,
       emotion: clamp01(raw?.emotion),
+      emotionLabel: EMOTION_LABELS.includes(String(raw?.emotionLabel || '').trim())
+        ? String(raw.emotionLabel).trim()
+        : '',
       uniqueness: clamp01(raw?.uniqueness),
       selfImpact: clamp01(raw?.selfImpact),
       confidence: clamp01(raw?.confidence ?? 0.6),
